@@ -25,33 +25,22 @@ router.get("/", async (req, res) => {
     const { role, client_id } = req.user;
 
     const query = client_id
-      ? `SELECT id, full_name, email, role, clinic_id, clinic_ids, client_id, is_active, is_archived,
+      ? `SELECT uid, name, email, role, clinic_ids, client_id, is_active, is_archived,
                 created_at, created_by, updated_at, updated_by
-         FROM users WHERE client_id=$1 ORDER BY id`
-      : `SELECT id, full_name, email, role, clinic_id, clinic_ids, client_id, is_active, is_archived,
+         FROM users WHERE client_id=$1 ORDER BY uid`
+      : `SELECT uid, name, email, role, clinic_ids, client_id, is_active, is_archived,
                 created_at, created_by, updated_at, updated_by
-         FROM users ORDER BY id`;
+         FROM users ORDER BY uid`;
 
     const params = client_id ? [client_id] : [];
     const { rows } = await pool.query(query, params);
 
     const users = rows.map((row) => {
-      let clinicIds = [];
-      try {
-        clinicIds =
-          typeof row.clinic_ids === "string"
-            ? JSON.parse(row.clinic_ids)
-            : row.clinic_ids || [];
-      } catch {
-        clinicIds = [];
-      }
-      if (clinicIds.length === 0 && row.clinic_id) {
-        clinicIds = [String(row.clinic_id)];
-      }
+      let clinicIds = Array.isArray(row.clinic_ids) ? row.clinic_ids : [];
       return {
-        uid: String(row.id),
+        uid: String(row.uid),
         email: row.email,
-        name: row.full_name,
+        name: row.name,
         role: row.role,
         clinicIds,
         clientId: row.client_id,
@@ -87,32 +76,35 @@ router.post("/", async (req, res) => {
       return res.status(403).json({ error: "Forbidden" });
     }
 
-    const { full_name, email, password, role, clinic_ids, is_active } =
+    const { name, full_name, email, password, role, clinic_ids, is_active } =
       req.body;
 
-    if (!full_name || !role) {
-      return res.status(400).json({ error: "full_name and role required" });
+    const userName = name || full_name;
+    if (!userName || !role) {
+      return res.status(400).json({ error: "name and role required" });
     }
 
     const plainPassword = password || makePassword();
     const hashedPassword = await bcrypt.hash(plainPassword, 10);
-    const clinicIdsJson = JSON.stringify(clinic_ids || []);
-    const deptClinicId =
-      clinic_ids && clinic_ids.length > 0 ? parseInt(clinic_ids[0]) : null;
+    const clinicIdsArr = clinic_ids || [];
+    const uid = role + '_' + Date.now();
+    const now = Date.now();
 
     const { rows } = await pool.query(
-      `INSERT INTO users (full_name, email, password, role, clinic_id, clinic_ids, client_id,
+      `INSERT INTO users (uid, name, email, password, role, clinic_ids, client_id,
                           created_at, updated_at, created_by, updated_by, is_active, is_archived)
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, NOW(), NOW(), 'system', 'system', $8, false)
-       RETURNING id, full_name, email, role`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'system', 'system', $10, false)
+       RETURNING uid, name, email, role`,
       [
-        full_name,
+        uid,
+        userName,
         email || null,
         hashedPassword,
         role,
-        deptClinicId,
-        clinicIdsJson,
+        clinicIdsArr,
         client_id,
+        now,
+        now,
         is_active !== false,
       ]
     );
@@ -141,45 +133,28 @@ router.post("/doctors", async (req, res) => {
       return res.status(403).json({ error: "Forbidden" });
     }
 
-    const { full_name, email } = req.body;
-    if (!full_name) {
-      return res.status(400).json({ error: "full_name required" });
+    const { full_name, name: bodyName, email } = req.body;
+    const doctorName = bodyName || full_name;
+    if (!doctorName) {
+      return res.status(400).json({ error: "name required" });
     }
 
-    let username = makeDoctorUsername(full_name);
     const password = makePassword();
     const hashedPassword = await bcrypt.hash(password, 10);
+    const uid = 'doctor_' + Date.now();
+    const now = Date.now();
 
-    try {
-      const { rows } = await pool.query(
-        `INSERT INTO users (full_name, email, role, username, password, client_id,
-                            created_at, updated_at, created_by, updated_by, is_active, is_archived)
-         VALUES ($1, $2, 'doctor', $3, $4, $5, NOW(), NOW(), 'system', 'system', true, false)
-         RETURNING id, full_name, username`,
-        [full_name, email || null, username, hashedPassword, client_id]
-      );
-      return res.status(201).json({
-        doctor: rows[0],
-        credentials: { username, password },
-      });
-    } catch (err) {
-      if (err.code === "23505") {
-        username =
-          username + "-" + Math.floor(1000 + Math.random() * 9000);
-        const { rows } = await pool.query(
-          `INSERT INTO users (full_name, email, role, username, password, client_id,
-                              created_at, updated_at, created_by, updated_by, is_active, is_archived)
-           VALUES ($1, $2, 'doctor', $3, $4, $5, NOW(), NOW(), 'system', 'system', true, false)
-           RETURNING id, full_name, username`,
-          [full_name, email || null, username, hashedPassword, client_id]
-        );
-        return res.status(201).json({
-          doctor: rows[0],
-          credentials: { username, password },
-        });
-      }
-      throw err;
-    }
+    const { rows } = await pool.query(
+      `INSERT INTO users (uid, name, email, role, password, client_id,
+                          created_at, updated_at, created_by, updated_by, is_active, is_archived, clinic_ids)
+       VALUES ($1, $2, $3, 'doctor', $4, $5, $6, $7, 'system', 'system', true, false, $8)
+       RETURNING uid, name, email`,
+      [uid, doctorName, email || null, hashedPassword, client_id, now, now, []]
+    );
+    return res.status(201).json({
+      doctor: rows[0],
+      credentials: { email: email, password },
+    });
   } catch (err) {
     console.error("POST /users/doctors error:", err);
     res.status(500).json({ error: "Server error" });
@@ -198,18 +173,20 @@ router.put("/:id", async (req, res) => {
       return res.status(403).json({ error: "Forbidden" });
     }
 
-    const userId = parseInt(req.params.id);
-    const { full_name, email, password, role, clinic_ids, is_active } =
+    const userId = req.params.id;
+    const { name, full_name, email, password, role, clinic_ids, is_active } =
       req.body;
 
     // Build SET clauses dynamically
-    const sets = ["updated_at=NOW()"];
+    const now = Date.now();
+    const sets = [`updated_at=${now}`];
     const params = [];
     let idx = 1;
 
-    if (full_name !== undefined) {
-      sets.push(`full_name=$${idx++}`);
-      params.push(full_name);
+    const userName = name || full_name;
+    if (userName !== undefined) {
+      sets.push(`name=$${idx++}`);
+      params.push(userName);
     }
     if (email !== undefined) {
       sets.push(`email=$${idx++}`);
@@ -225,8 +202,8 @@ router.put("/:id", async (req, res) => {
       params.push(role);
     }
     if (clinic_ids !== undefined) {
-      sets.push(`clinic_ids=$${idx++}::jsonb`);
-      params.push(JSON.stringify(clinic_ids));
+      sets.push(`clinic_ids=$${idx++}`);
+      params.push(Array.isArray(clinic_ids) ? clinic_ids : []);
     }
     if (is_active !== undefined) {
       sets.push(`is_active=$${idx++}`);
@@ -235,7 +212,7 @@ router.put("/:id", async (req, res) => {
 
     // Add WHERE clause params
     params.push(userId);
-    const whereId = `id=$${idx++}`;
+    const whereId = `uid=$${idx++}`;
 
     let whereClause = whereId;
     if (client_id) {
@@ -267,10 +244,10 @@ router.delete("/:id", async (req, res) => {
       return res.status(403).json({ error: "Forbidden" });
     }
 
-    const userId = parseInt(req.params.id);
+    const userId = req.params.id;
     const query = client_id
-      ? "DELETE FROM users WHERE id=$1 AND client_id=$2"
-      : "DELETE FROM users WHERE id=$1";
+      ? "DELETE FROM users WHERE uid=$1 AND client_id=$2"
+      : "DELETE FROM users WHERE uid=$1";
     const params = client_id ? [userId, client_id] : [userId];
 
     await pool.query(query, params);

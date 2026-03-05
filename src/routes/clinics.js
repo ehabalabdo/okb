@@ -60,11 +60,12 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "name required" });
     }
 
+    const now = Date.now();
     const { rows } = await pool.query(
-      `INSERT INTO clinics (name, type, category, active, client_id, created_at, updated_at, created_by, updated_by, is_archived)
-       VALUES ($1, $2, $3, $4, $5, NOW(), NOW(), 'system', 'system', false)
+      `INSERT INTO clinics (id, name, type, category, active, client_id, created_at, updated_at, created_by, updated_by, is_archived)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'system', 'system', false)
        RETURNING *`,
-      [name, type || "General", category || "clinic", active !== false, client_id]
+      [name.toLowerCase().replace(/\s+/g, '_') + '_' + Date.now(), name, type || "General", category || "clinic", active !== false, client_id, now, now]
     );
 
     res.status(201).json({
@@ -96,7 +97,7 @@ router.put("/:id", async (req, res) => {
     const clinicId = parseInt(req.params.id);
     const { name, type, category, active } = req.body;
 
-    const sets = ["updated_at=NOW()"];
+    const sets = [`updated_at=${Date.now()}`];
     const params = [];
     let idx = 1;
 
@@ -117,7 +118,7 @@ router.put("/:id", async (req, res) => {
       params.push(active);
     }
 
-    params.push(clinicId);
+    params.push(req.params.id);
     let whereClause = `id=$${idx++}`;
     if (client_id) {
       params.push(client_id);
@@ -148,12 +149,12 @@ router.put("/:id/status", async (req, res) => {
       return res.status(403).json({ error: "Forbidden" });
     }
 
-    const clinicId = parseInt(req.params.id);
+    const clinicId = req.params.id;
     const { active } = req.body;
 
     const query = client_id
-      ? "UPDATE clinics SET active=$1, updated_at=NOW() WHERE id=$2 AND client_id=$3"
-      : "UPDATE clinics SET active=$1, updated_at=NOW() WHERE id=$2";
+      ? `UPDATE clinics SET active=$1, updated_at=${Date.now()} WHERE id=$2 AND client_id=$3`
+      : `UPDATE clinics SET active=$1, updated_at=${Date.now()} WHERE id=$2`;
     const params = client_id
       ? [active, clinicId, client_id]
       : [active, clinicId];
@@ -178,7 +179,7 @@ router.delete("/:id", async (req, res) => {
       return res.status(403).json({ error: "Forbidden" });
     }
 
-    const clinicId = parseInt(req.params.id);
+    const clinicId = req.params.id;
     const query = client_id
       ? "DELETE FROM clinics WHERE id=$1 AND client_id=$2"
       : "DELETE FROM clinics WHERE id=$1";

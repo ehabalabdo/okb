@@ -31,7 +31,7 @@ function mapInvoiceRow(row) {
     createdBy: row.created_by || "system",
     updatedAt: row.updated_at ? new Date(row.updated_at).getTime() : Date.now(),
     updatedBy: row.updated_by || "system",
-    isArchived: row.is_archived || false,
+    isArchived: false,
   };
 }
 
@@ -83,17 +83,20 @@ router.post("/", async (req, res) => {
     const paid = paidAmount || paid_amount || 0;
     const method = paymentMethod || payment_method || "cash";
 
+    const now = Date.now();
+
     const { rows } = await pool.query(
       `INSERT INTO invoices (
         id, visit_id, patient_id, patient_name, items,
         total_amount, paid_amount, payment_method, status,
-        client_id, created_at, updated_at, created_by, updated_by, is_archived
+        client_id, created_at, updated_at, created_by, updated_by
       )
-      VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, NOW(), NOW(), 'system', 'system', false)
+      VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, 'system', 'system')
       RETURNING *`,
       [
         invoiceId, vId, pId, pName, JSON.stringify(items || []),
         total, paid, method, status || "unpaid", client_id,
+        now, now,
       ]
     );
 
@@ -120,7 +123,7 @@ router.put("/:id", async (req, res) => {
       status,
     } = req.body;
 
-    const sets = ["updated_at=NOW()"];
+    const sets = [`updated_at=${Date.now()}`];
     const params = [];
     let idx = 1;
 

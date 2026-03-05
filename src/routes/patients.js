@@ -111,15 +111,12 @@ router.get("/", async (req, res) => {
  */
 router.get("/:id", async (req, res) => {
   try {
-    const patientId = parseInt(req.params.id);
-    if (isNaN(patientId)) {
-      return res.status(400).json({ error: "Invalid patient ID" });
-    }
+    const patientId = req.params.id;
 
     const { client_id, type, patient_id } = req.user;
 
     // Patients can only view their own record
-    if (type === "patient" && patient_id !== patientId) {
+    if (type === "patient" && String(patient_id) !== String(patientId)) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
@@ -250,8 +247,8 @@ router.put("/:id", async (req, res) => {
     const { role, client_id, type, patient_id: callerPatientId } = req.user;
 
     // Patients can only update their own record (limited fields)
-    const patientId = parseInt(req.params.id);
-    if (type === "patient" && callerPatientId !== patientId) {
+    const patientId = req.params.id;
+    if (type === "patient" && String(callerPatientId) !== String(patientId)) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
@@ -360,7 +357,7 @@ router.delete("/:id", async (req, res) => {
       return res.status(403).json({ error: "Forbidden" });
     }
 
-    const patientId = parseInt(req.params.id);
+    const patientId = req.params.id;
     const query = client_id
       ? "DELETE FROM patients WHERE id=$1 AND client_id=$2"
       : "DELETE FROM patients WHERE id=$1";

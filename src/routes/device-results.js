@@ -62,21 +62,20 @@ router.get("/", async (req, res) => {
     let query, params;
 
     if (patientId) {
-      const pid = parseInt(patientId);
       query = `
         SELECT dr.*, d.name as device_name, d.type as device_type
         FROM device_results dr
         LEFT JOIN devices d ON d.id = dr.device_id
-        WHERE dr.matched_patient_id=$1 AND dr.client_id=$2
+        WHERE dr.matched_patient_id::text=$1 AND dr.client_id=$2
         ORDER BY dr.created_at DESC
       `;
-      params = [pid, client_id];
+      params = [String(patientId), client_id];
     } else if (status) {
       query = `
         SELECT dr.*, d.name as device_name, d.type as device_type, p.full_name as patient_name
         FROM device_results dr
         LEFT JOIN devices d ON d.id = dr.device_id
-        LEFT JOIN patients p ON p.id = dr.matched_patient_id
+        LEFT JOIN patients p ON p.id = dr.matched_patient_id::text
         WHERE dr.client_id=$1 AND dr.status=$2
         ORDER BY dr.created_at DESC
         LIMIT 200
@@ -87,7 +86,7 @@ router.get("/", async (req, res) => {
         SELECT dr.*, d.name as device_name, d.type as device_type, p.full_name as patient_name
         FROM device_results dr
         LEFT JOIN devices d ON d.id = dr.device_id
-        LEFT JOIN patients p ON p.id = dr.matched_patient_id
+        LEFT JOIN patients p ON p.id = dr.matched_patient_id::text
         WHERE dr.client_id=$1
         ORDER BY dr.created_at DESC
         LIMIT 200
@@ -168,9 +167,10 @@ router.post("/", async (req, res) => {
 
     const numericId = parseInt(identifier);
     if (!isNaN(numericId)) {
+      // Try matching by numeric patient ID cast to text
       const match = await pool.query(
         "SELECT id FROM patients WHERE id=$1 AND client_id=$2 LIMIT 1",
-        [numericId, client_id]
+        [String(identifier), client_id]
       );
       if (match.rows.length > 0) {
         matchedPatientId = match.rows[0].id;
@@ -239,10 +239,10 @@ router.put("/:id/match", async (req, res) => {
     const resultId = req.params.id;
     const { patientId, patient_id, matchedBy, matched_by } = req.body;
 
-    const pId = parseInt(patientId || patient_id);
+    const pId = String(patientId || patient_id || "");
     const by = matchedBy || matched_by || "manual";
 
-    if (isNaN(pId)) {
+    if (!pId) {
       return res.status(400).json({ error: "patientId required" });
     }
 

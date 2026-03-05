@@ -20,18 +20,22 @@ router.get("/doctor-load", async (req, res) => {
   try {
     const { from, to } = req.query;
     if (!from || !to) return res.status(400).json({ error: "from and to query params required" });
-    const clinicId = req.user.clinic_id;
-    if (!clinicId) return res.status(400).json({ error: "No clinic_id associated with user" });
+    const clientId = req.user.client_id;
+    if (!clientId) return res.status(400).json({ error: "No client_id associated with user" });
+
+    // from/to can be ISO dates or epoch-ms; convert to epoch-ms
+    const fromMs = isNaN(Number(from)) ? new Date(from).getTime() : Number(from);
+    const toMs = isNaN(Number(to)) ? new Date(to).getTime() : Number(to);
 
     const { rows } = await pool.query(
-      `SELECT u.full_name AS doctor, COUNT(a.id) AS total
+      `SELECT u.name AS doctor, COUNT(a.id) AS total
        FROM appointments a
-       JOIN users u ON a.doctor_id = u.id
-       WHERE a.clinic_id=$1
-         AND a.start_time BETWEEN $2 AND $3
-       GROUP BY u.full_name
+       JOIN users u ON a.doctor_id = u.uid
+       WHERE a.client_id=$1
+         AND a.date BETWEEN $2 AND $3
+       GROUP BY u.name
        ORDER BY total DESC`,
-      [clinicId, from, to]
+      [clientId, fromMs, toMs]
     );
 
     res.json(rows);
@@ -46,17 +50,20 @@ router.get("/cancellations", async (req, res) => {
   try {
     const { from, to } = req.query;
     if (!from || !to) return res.status(400).json({ error: "from and to query params required" });
-    const clinicId = req.user.clinic_id;
-    if (!clinicId) return res.status(400).json({ error: "No clinic_id associated with user" });
+    const clientId = req.user.client_id;
+    if (!clientId) return res.status(400).json({ error: "No client_id associated with user" });
+
+    const fromMs = isNaN(Number(from)) ? new Date(from).getTime() : Number(from);
+    const toMs = isNaN(Number(to)) ? new Date(to).getTime() : Number(to);
 
     const { rows } = await pool.query(
       `SELECT status, COUNT(*) AS total
        FROM appointments
-       WHERE clinic_id=$1
+       WHERE client_id=$1
          AND status IN ('cancelled','no_show')
-         AND start_time BETWEEN $2 AND $3
+         AND date BETWEEN $2 AND $3
        GROUP BY status`,
-      [clinicId, from, to]
+      [clientId, fromMs, toMs]
     );
 
     res.json(rows);
@@ -71,17 +78,20 @@ router.get("/peak-hours", async (req, res) => {
   try {
     const { from, to } = req.query;
     if (!from || !to) return res.status(400).json({ error: "from and to query params required" });
-    const clinicId = req.user.clinic_id;
-    if (!clinicId) return res.status(400).json({ error: "No clinic_id associated with user" });
+    const clientId = req.user.client_id;
+    if (!clientId) return res.status(400).json({ error: "No client_id associated with user" });
+
+    const fromMs = isNaN(Number(from)) ? new Date(from).getTime() : Number(from);
+    const toMs = isNaN(Number(to)) ? new Date(to).getTime() : Number(to);
 
     const { rows } = await pool.query(
-      `SELECT EXTRACT(HOUR FROM start_time) AS hour, COUNT(*) AS total
+      `SELECT EXTRACT(HOUR FROM to_timestamp(date / 1000.0)) AS hour, COUNT(*) AS total
        FROM appointments
-       WHERE clinic_id=$1
-         AND start_time BETWEEN $2 AND $3
+       WHERE client_id=$1
+         AND date BETWEEN $2 AND $3
        GROUP BY hour
        ORDER BY total DESC`,
-      [clinicId, from, to]
+      [clientId, fromMs, toMs]
     );
 
     res.json(rows);

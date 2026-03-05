@@ -174,16 +174,18 @@ router.post("/", async (req, res) => {
     const access = has_access !== undefined ? has_access : (hasAccess !== undefined ? hasAccess : false);
 
     try {
+      const patientId = "pat_" + Date.now();
       const { rows } = await pool.query(
         `INSERT INTO patients (
-          full_name, age, date_of_birth, gender, phone, username, email, password, has_access,
+          id, full_name, age, date_of_birth, gender, phone, username, email, password, has_access,
           notes, medical_profile, current_visit, history,
           client_id, created_at, updated_at, created_by, updated_by, is_archived
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb, $13::jsonb,
-                $14, NOW(), NOW(), 'system', 'system', false)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14::jsonb,
+                $15, NOW(), NOW(), 'system', 'system', false)
         RETURNING id, full_name, phone, username`,
         [
+          patientId,
           patientName, age, dob, gender || "male", phone || "",
           finalUsername, email || null, hashedPassword, access,
           notes || medProfile?.notes || "",
@@ -208,16 +210,18 @@ router.post("/", async (req, res) => {
         finalUsername = finalUsername + "-" + Math.floor(1000 + Math.random() * 9000);
         plainPassword = makePassword();
         hashedPassword = await bcrypt.hash(plainPassword, 10);
+        const retryPatientId = "pat_" + Date.now() + "_" + Math.floor(Math.random() * 1000);
         const { rows } = await pool.query(
           `INSERT INTO patients (
-            full_name, age, date_of_birth, gender, phone, username, email, password, has_access,
+            id, full_name, age, date_of_birth, gender, phone, username, email, password, has_access,
             notes, medical_profile, current_visit, history,
             client_id, created_at, updated_at, created_by, updated_by, is_archived
           )
-          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb, $13::jsonb,
-                  $14, NOW(), NOW(), 'system', 'system', false)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14::jsonb,
+                  $15, NOW(), NOW(), 'system', 'system', false)
           RETURNING id, full_name, phone, username`,
           [
+            retryPatientId,
             patientName, age, dob, gender || "male", phone || "",
             finalUsername, email || null, hashedPassword, access,
             notes || medProfile?.notes || "",

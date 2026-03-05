@@ -1,1 +1,2 @@
-// This file is now unused. All logic moved to src/app.js for production entrypoint.
+// Entry point - imports the main app
+import "./app.js";

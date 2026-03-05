@@ -29,7 +29,7 @@ app.use(globalLimiter);
 app.use(helmet());
 
 // CORS: Production origins + localhost only in dev
-const allowedOrigins = ["https://okf.vercel.app"];
+const allowedOrigins = ["https://okf-nine.vercel.app", "https://okf.vercel.app"];
 if (process.env.NODE_ENV !== "production") {
   allowedOrigins.push("http://localhost:5173", "http://localhost:3000");
 }

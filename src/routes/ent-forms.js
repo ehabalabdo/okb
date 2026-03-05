@@ -134,7 +134,7 @@ router.get("/follow-up/:patientId", async (req, res) => {
 router.post("/audiogram", async (req, res) => {
   try {
     const { role, client_id } = req.user;
-    if (!["admin", "doctor", "super_admin"].includes(role)) {
+    if (!["admin", "doctor", "technician", "super_admin"].includes(role)) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
@@ -196,7 +196,7 @@ router.get("/audiogram/:patientId", async (req, res) => {
 router.post("/balance-assessment", async (req, res) => {
   try {
     const { role, client_id } = req.user;
-    if (!["admin", "doctor", "super_admin"].includes(role)) {
+    if (!["admin", "doctor", "technician", "super_admin"].includes(role)) {
       return res.status(403).json({ error: "Forbidden" });
     }
 

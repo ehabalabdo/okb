@@ -21,14 +21,14 @@ router.post("/login", async (req, res) => {
 
     // 1) Check users table (staff: admin, doctor, receptionist, etc.)
     const staffQuery = client_id
-      ? `SELECT id, full_name, email, password, role, clinic_id, clinic_ids, client_id, is_active
+      ? `SELECT uid, name, email, password, role, clinic_ids, client_id, is_active
          FROM users
-         WHERE (full_name=$1 OR email=$1)
+         WHERE (name=$1 OR email=$1)
            AND client_id=$2
          LIMIT 1`
-      : `SELECT id, full_name, email, password, role, clinic_id, clinic_ids, client_id, is_active
+      : `SELECT uid, name, email, password, role, clinic_ids, client_id, is_active
          FROM users
-         WHERE (full_name=$1 OR email=$1)
+         WHERE (name=$1 OR email=$1)
          LIMIT 1`;
 
     const staffParams = client_id ? [username, client_id] : [username];
@@ -49,7 +49,7 @@ router.post("/login", async (req, res) => {
         passwordValid = true;
         // Auto-migrate: hash the plaintext password and save it
         const hashed = await bcrypt.hash(password, 10);
-        pool.query("UPDATE users SET password=$1 WHERE id=$2", [hashed, user.id]).catch(() => {});
+        pool.query("UPDATE users SET password=$1 WHERE uid=$2", [hashed, user.uid]).catch(() => {});
       }
 
       if (!passwordValid) {
@@ -66,11 +66,11 @@ router.post("/login", async (req, res) => {
 
       const token = jwt.sign(
         {
-          id: user.id,
+          id: user.uid,
+          uid: user.uid,
           role: user.role,
           type: "staff",
           client_id: user.client_id,
-          clinic_id: user.clinic_id,
         },
         process.env.JWT_SECRET,
         { expiresIn: "8h" }
@@ -80,8 +80,8 @@ router.post("/login", async (req, res) => {
         token,
         type: "staff",
         user: {
-          uid: String(user.id),
-          name: user.full_name,
+          uid: String(user.uid),
+          name: user.name,
           email: user.email,
           role: user.role,
           clinicIds,

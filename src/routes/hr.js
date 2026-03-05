@@ -1742,17 +1742,20 @@ router.get("/notifications", async (req, res) => {
 router.post("/notifications", async (req, res) => {
   if (!requireAdmin(req, res)) return;
   try {
-    const { client_id, id: userId } = req.user;
+    const { client_id, hr_employee_id } = req.user;
     const { employee_id, message } = req.body;
 
     if (!employee_id || !message) {
       return res.status(400).json({ error: "employee_id, message required" });
     }
 
+    // created_by is FK to hr_employees(id) — only set if caller is an HR employee
+    const createdBy = hr_employee_id ? parseInt(hr_employee_id) : null;
+
     const { rows } = await pool.query(
       `INSERT INTO hr_notifications (client_id, employee_id, message, created_by)
        VALUES ($1,$2,$3,$4) RETURNING *`,
-      [client_id, employee_id, message, userId || null]
+      [client_id, employee_id, message, createdBy]
     );
 
     res.status(201).json({

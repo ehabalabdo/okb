@@ -219,6 +219,7 @@ router.get("/top-services", async (req, res) => {
        FROM invoices,
             jsonb_array_elements(items) AS item
        WHERE client_id = $1
+         AND items IS NOT NULL AND jsonb_typeof(items) = 'array'
          AND created_at BETWEEN $2 AND $3
        GROUP BY service_name
        ORDER BY total DESC

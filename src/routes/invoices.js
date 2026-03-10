@@ -22,7 +22,7 @@ function mapInvoiceRow(row) {
     visitId: row.visit_id,
     patientId: row.patient_id,
     patientName: row.patient_name,
-    items: typeof row.items === "string" ? JSON.parse(row.items) : row.items,
+    items: (() => { try { return typeof row.items === "string" ? JSON.parse(row.items) : (row.items || []); } catch { return []; } })(),
     totalAmount: parseFloat(row.total_amount),
     paidAmount: parseFloat(row.paid_amount),
     paymentMethod: row.payment_method,
@@ -79,11 +79,14 @@ router.post("/", async (req, res) => {
     const vId = visitId || visit_id;
     const pId = patientId || patient_id;
     const pName = patientName || patient_name || "";
-    const total = totalAmount || total_amount || 0;
+    const parsedItems = items || [];
+    const calculatedTotal = parsedItems.reduce((s, i) => s + (parseFloat(i.price) || 0), 0);
+    const total = calculatedTotal || totalAmount || total_amount || 0;
     const paid = paidAmount || paid_amount || 0;
     const method = paymentMethod || payment_method || "cash";
 
     const now = Date.now();
+    const userId = req.user.id || req.user.username || 'system';
 
     const { rows } = await pool.query(
       `INSERT INTO invoices (
@@ -91,12 +94,12 @@ router.post("/", async (req, res) => {
         total_amount, paid_amount, payment_method, status,
         client_id, created_at, updated_at, created_by, updated_by
       )
-      VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, 'system', 'system')
+      VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, $13, $14)
       RETURNING *`,
       [
-        invoiceId, vId, pId, pName, JSON.stringify(items || []),
+        invoiceId, vId, pId, pName, JSON.stringify(parsedItems),
         total, paid, method, status || "unpaid", client_id,
-        now, now,
+        now, now, userId, userId,
       ]
     );
 
@@ -123,17 +126,21 @@ router.put("/:id", async (req, res) => {
       status,
     } = req.body;
 
-    const sets = [`updated_at=${Date.now()}`];
+    const sets = [`updated_at=${Date.now()}`, `updated_by='${(req.user.id || req.user.username || 'system').toString().replace(/'/g, "''")}'`];
     const params = [];
     let idx = 1;
 
     if (items !== undefined) {
       sets.push(`items=$${idx++}::jsonb`);
       params.push(JSON.stringify(items));
+      // Auto-recalculate total from items
+      const recalcTotal = items.reduce((s, i) => s + (parseFloat(i.price) || 0), 0);
+      sets.push(`total_amount=$${idx++}`);
+      params.push(recalcTotal);
     }
 
     const total = totalAmount !== undefined ? totalAmount : total_amount;
-    if (total !== undefined) {
+    if (total !== undefined && items === undefined) {
       sets.push(`total_amount=$${idx++}`);
       params.push(total);
     }

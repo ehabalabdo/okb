@@ -216,11 +216,44 @@ router.delete("/:id", async (req, res) => {
     }
 
     const invoiceId = req.params.id;
-    const query = client_id
+
+    // 1. Get the invoice to find visit_id and patient_id
+    const invQuery = client_id
+      ? "SELECT visit_id, patient_id FROM invoices WHERE id=$1 AND client_id=$2"
+      : "SELECT visit_id, patient_id FROM invoices WHERE id=$1";
+    const invParams = client_id ? [invoiceId, client_id] : [invoiceId];
+    const { rows: invRows } = await pool.query(invQuery, invParams);
+
+    if (invRows.length > 0 && invRows[0].visit_id && invRows[0].patient_id) {
+      const { visit_id, patient_id } = invRows[0];
+
+      // 2. Remove the visit from patient's history array
+      const { rows: patRows } = await pool.query(
+        "SELECT history FROM patients WHERE id=$1", [patient_id]
+      );
+      if (patRows.length > 0 && patRows[0].history) {
+        let history = patRows[0].history;
+        if (typeof history === "string") {
+          try { history = JSON.parse(history); } catch { history = []; }
+        }
+        if (Array.isArray(history)) {
+          const filtered = history.filter(v => v.visitId !== visit_id);
+          if (filtered.length !== history.length) {
+            await pool.query(
+              "UPDATE patients SET history=$1::jsonb WHERE id=$2",
+              [JSON.stringify(filtered), patient_id]
+            );
+          }
+        }
+      }
+    }
+
+    // 3. Delete the invoice
+    const delQuery = client_id
       ? "DELETE FROM invoices WHERE id=$1 AND client_id=$2"
       : "DELETE FROM invoices WHERE id=$1";
-    const params = client_id ? [invoiceId, client_id] : [invoiceId];
-    await pool.query(query, params);
+    const delParams = client_id ? [invoiceId, client_id] : [invoiceId];
+    await pool.query(delQuery, delParams);
 
     res.json({ success: true });
   } catch (err) {

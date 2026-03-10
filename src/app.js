@@ -64,7 +64,21 @@ app.use("/ent-forms", entFormsRouter);
 
 app.get("/", (_, res) => res.send("OKB API running - Dr. Tarek Khrais ENT Clinic"));
 
+// Health check endpoint for keep-alive pings
+app.get("/health", (_, res) => res.json({ status: "ok", uptime: process.uptime() }));
+
+// Self keep-alive: ping ourselves every 14 minutes to prevent Render cold starts
+const SELF_PING_INTERVAL = 14 * 60 * 1000;
+function selfPing() {
+  const url = process.env.RENDER_EXTERNAL_URL || `http://localhost:${process.env.PORT || 3000}`;
+  fetch(`${url}/health`).catch(() => {});
+}
+
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () =>
-  console.log(`API running on port ${PORT}`)
-);
+app.listen(PORT, () => {
+  console.log(`API running on port ${PORT}`);
+  if (process.env.NODE_ENV === "production") {
+    setInterval(selfPing, SELF_PING_INTERVAL);
+    console.log("Keep-alive self-ping enabled (every 14 min)");
+  }
+});

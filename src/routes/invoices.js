@@ -137,6 +137,29 @@ router.put("/:id", async (req, res) => {
       const recalcTotal = items.reduce((s, i) => s + (parseFloat(i.price) || 0), 0);
       sets.push(`total_amount=$${idx++}`);
       params.push(recalcTotal);
+
+      // If paid > new total, cap paid_amount and fix status
+      const { rows: currentRows } = await pool.query(
+        `SELECT paid_amount FROM invoices WHERE id=$1`, [invoiceId]
+      );
+      if (currentRows.length > 0) {
+        const currentPaid = parseFloat(currentRows[0].paid_amount) || 0;
+        if (currentPaid > recalcTotal) {
+          sets.push(`paid_amount=$${idx++}`);
+          params.push(recalcTotal);
+          sets.push(`status=$${idx++}`);
+          params.push('paid');
+        } else if (currentPaid > 0 && currentPaid < recalcTotal) {
+          sets.push(`status=$${idx++}`);
+          params.push('partial');
+        } else if (currentPaid === 0) {
+          sets.push(`status=$${idx++}`);
+          params.push('unpaid');
+        } else if (currentPaid >= recalcTotal) {
+          sets.push(`status=$${idx++}`);
+          params.push('paid');
+        }
+      }
     }
 
     const total = totalAmount !== undefined ? totalAmount : total_amount;

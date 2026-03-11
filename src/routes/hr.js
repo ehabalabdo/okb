@@ -164,20 +164,34 @@ router.use(auth);
 //  CONSTANTS / HELPERS
 // ============================================================
 
-/** Relying-party config for WebAuthn (must match the HTTPS origin) */
-const RP_NAME = "MED LOOP HR";
-const RP_ID_PROD = "med.loopjo.com";
-const RP_ORIGIN_PROD = "https://med.loopjo.com";
-const RP_ID_DEV = "localhost";
-const RP_ORIGIN_DEV = "http://localhost:3000";
+/** Relying-party config for WebAuthn (derived from request Origin header) */
+const RP_NAME = "TKC HR";
 
-function rpConfig() {
-  const isProd = process.env.NODE_ENV === "production" ||
-    !process.env.NODE_ENV; // default to prod on Render
+/** Allowed production origins for WebAuthn */
+const ALLOWED_ORIGINS = [
+  "https://okf-nine.vercel.app",
+  "https://tkc-clinic.netlify.app",
+  "https://med.loopjo.com",
+];
+
+function rpConfig(req) {
+  const origin = req?.headers?.origin;
+  // Dev mode
+  if (origin && origin.startsWith("http://localhost")) {
+    const url = new URL(origin);
+    return { rpID: url.hostname, rpName: RP_NAME, origin };
+  }
+  // Production: use the request Origin if it's in allowed list
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    const url = new URL(origin);
+    return { rpID: url.hostname, rpName: RP_NAME, origin };
+  }
+  // Fallback to first allowed origin
+  const fallbackUrl = new URL(ALLOWED_ORIGINS[0]);
   return {
-    rpID: isProd ? RP_ID_PROD : RP_ID_DEV,
+    rpID: fallbackUrl.hostname,
     rpName: RP_NAME,
-    origin: isProd ? RP_ORIGIN_PROD : RP_ORIGIN_DEV,
+    origin: ALLOWED_ORIGINS[0],
   };
 }
 
@@ -214,7 +228,7 @@ function requireHrEmployee(req, res) {
 // ============================================================
 if (process.env.NODE_ENV !== "production") {
   router.get("/webauthn/debug", async (req, res) => {
-    const config = rpConfig();
+    const config = rpConfig(req);
     const credCount = await pool.query(
       `SELECT COUNT(*) AS cnt FROM hr_biometric_credentials WHERE employee_id=$1`,
       [req.user.hr_employee_id || 0]
@@ -657,7 +671,7 @@ router.post("/webauthn/register/options", async (req, res) => {
   if (!requireHrEmployee(req, res)) return;
   try {
     const { hr_employee_id, client_id } = req.user;
-    const { rpID, rpName } = rpConfig();
+    const { rpID, rpName } = rpConfig(req);
 
     const emp = await pool.query(
       `SELECT id, full_name, username FROM hr_employees WHERE id=$1 AND client_id=$2`,
@@ -715,7 +729,7 @@ router.post("/webauthn/register/verify", async (req, res) => {
   if (!requireHrEmployee(req, res)) return;
   try {
     const { hr_employee_id, client_id } = req.user;
-    const { rpID, origin } = rpConfig();
+    const { rpID, origin } = rpConfig(req);
 
     // Retrieve stored challenge
     const ch = await pool.query(
@@ -812,7 +826,7 @@ router.post("/webauthn/authenticate/options", async (req, res) => {
   if (!requireHrEmployee(req, res)) return;
   try {
     const { hr_employee_id } = req.user;
-    const { rpID } = rpConfig();
+    const { rpID } = rpConfig(req);
 
     const creds = await pool.query(
       `SELECT credential_id, transports FROM hr_biometric_credentials WHERE employee_id=$1`,
@@ -858,7 +872,7 @@ router.post("/webauthn/authenticate/verify", async (req, res) => {
   if (!requireHrEmployee(req, res)) return;
   try {
     const { hr_employee_id } = req.user;
-    const { rpID, origin } = rpConfig();
+    const { rpID, origin } = rpConfig(req);
 
     const ch = await pool.query(
       `SELECT challenge FROM hr_webauthn_challenges

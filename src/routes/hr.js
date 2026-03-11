@@ -955,7 +955,7 @@ router.post("/webauthn/authenticate/verify", async (req, res) => {
     res.json({ verified: true, bioToken });
   } catch (err) {
     console.error("POST /hr/webauthn/authenticate/verify error:", err);
-    res.status(500).json({ error: "Server error" });
+    res.status(500).json({ error: "Server error", message: err?.message || "Unknown auth verify error" });
   }
 });
 
@@ -1129,7 +1129,7 @@ router.post("/attendance/check-in", async (req, res) => {
     res.json({ message: "Checked in", time: now.toISOString(), clinicName: geo.clinic.name });
   } catch (err) {
     console.error("POST /hr/attendance/check-in error:", err);
-    res.status(500).json({ error: "Server error" });
+    res.status(500).json({ error: "Server error", message: err?.message || "Unknown check-in error" });
   }
 });
 

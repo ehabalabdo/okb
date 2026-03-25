@@ -2252,4 +2252,264 @@ router.post("/payroll/close-month", async (req, res) => {
   }
 });
 
+// ============================================================
+//  LEAVE MANAGEMENT
+// ============================================================
+
+/**
+ * POST /hr/leaves — Employee submits a leave request
+ */
+router.post("/leaves", async (req, res) => {
+  if (!requireHrEmployee(req, res)) return;
+  try {
+    const { hr_employee_id, client_id } = req.user;
+    const { leave_type, start_date, end_date, reason } = req.body;
+
+    if (!leave_type || !start_date || !end_date) {
+      return res.status(400).json({ error: "leave_type, start_date, end_date are required" });
+    }
+    if (!["annual", "sick"].includes(leave_type)) {
+      return res.status(400).json({ error: "leave_type must be 'annual' or 'sick'" });
+    }
+
+    const s = new Date(start_date);
+    const e = new Date(end_date);
+    if (isNaN(s.getTime()) || isNaN(e.getTime()) || e < s) {
+      return res.status(400).json({ error: "Invalid date range" });
+    }
+    const duration_days = Math.round((e - s) / 86400000) + 1;
+
+    const now = Date.now();
+    const { rows } = await pool.query(
+      `INSERT INTO hr_leave_requests (employee_id, client_id, leave_type, start_date, end_date, duration_days, reason, created_at, updated_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$8)
+       RETURNING *`,
+      [hr_employee_id, client_id, leave_type, start_date, end_date, duration_days, reason || null, now]
+    );
+    const r = rows[0];
+    res.status(201).json({
+      id: r.id,
+      employeeId: r.employee_id,
+      leaveType: r.leave_type,
+      startDate: r.start_date,
+      endDate: r.end_date,
+      durationDays: r.duration_days,
+      reason: r.reason,
+      status: r.status,
+      createdAt: Number(r.created_at),
+    });
+  } catch (err) {
+    console.error("POST /hr/leaves error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/**
+ * GET /hr/leaves/me — Employee views own leave requests
+ */
+router.get("/leaves/me", async (req, res) => {
+  if (!requireHrEmployee(req, res)) return;
+  try {
+    const { hr_employee_id, client_id } = req.user;
+    const { rows } = await pool.query(
+      `SELECT lr.*, e.full_name AS approved_by_name
+       FROM hr_leave_requests lr
+       LEFT JOIN hr_employees e ON e.id = lr.approved_by
+       WHERE lr.employee_id=$1 AND lr.client_id=$2
+       ORDER BY lr.created_at DESC`,
+      [hr_employee_id, client_id]
+    );
+    res.json(rows.map(r => ({
+      id: r.id,
+      employeeId: r.employee_id,
+      leaveType: r.leave_type,
+      startDate: r.start_date,
+      endDate: r.end_date,
+      durationDays: r.duration_days,
+      reason: r.reason,
+      status: r.status,
+      rejectionReason: r.rejection_reason,
+      approvedByName: r.approved_by_name,
+      approvedAt: r.approved_at ? Number(r.approved_at) : null,
+      createdAt: Number(r.created_at),
+    })));
+  } catch (err) {
+    console.error("GET /hr/leaves/me error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/**
+ * DELETE /hr/leaves/:id — Employee cancels own pending request
+ */
+router.delete("/leaves/:id", async (req, res) => {
+  if (!requireHrEmployee(req, res)) return;
+  try {
+    const { hr_employee_id, client_id } = req.user;
+    const { id } = req.params;
+    const { rows } = await pool.query(
+      `SELECT * FROM hr_leave_requests WHERE id=$1 AND employee_id=$2 AND client_id=$3`,
+      [id, hr_employee_id, client_id]
+    );
+    if (!rows.length) return res.status(404).json({ error: "Not found" });
+    if (rows[0].status !== "pending") {
+      return res.status(400).json({ error: "Can only cancel pending requests" });
+    }
+    await pool.query(
+      `UPDATE hr_leave_requests SET status='cancelled', updated_at=$1 WHERE id=$2`,
+      [Date.now(), id]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error("DELETE /hr/leaves/:id error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/**
+ * GET /hr/leaves — Admin views all leave requests (filterable)
+ * Query: ?status=pending&employee_id=5
+ */
+router.get("/leaves", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const { client_id } = req.user;
+    const { status, employee_id } = req.query;
+
+    let sql = `SELECT lr.*, e.full_name AS employee_name
+               FROM hr_leave_requests lr
+               JOIN hr_employees e ON e.id = lr.employee_id
+               WHERE lr.client_id=$1`;
+    const params = [client_id];
+    let idx = 2;
+
+    if (status) {
+      sql += ` AND lr.status=$${idx++}`;
+      params.push(status);
+    }
+    if (employee_id) {
+      sql += ` AND lr.employee_id=$${idx++}`;
+      params.push(employee_id);
+    }
+    sql += ` ORDER BY lr.created_at DESC`;
+
+    const { rows } = await pool.query(sql, params);
+    res.json(rows.map(r => ({
+      id: r.id,
+      employeeId: r.employee_id,
+      employeeName: r.employee_name,
+      leaveType: r.leave_type,
+      startDate: r.start_date,
+      endDate: r.end_date,
+      durationDays: r.duration_days,
+      reason: r.reason,
+      status: r.status,
+      rejectionReason: r.rejection_reason,
+      createdAt: Number(r.created_at),
+    })));
+  } catch (err) {
+    console.error("GET /hr/leaves error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/**
+ * POST /hr/leaves/:id/approve — Admin approves a leave request
+ */
+router.post("/leaves/:id/approve", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const { client_id, uid } = req.user;
+    const { id } = req.params;
+    const { rows } = await pool.query(
+      `SELECT * FROM hr_leave_requests WHERE id=$1 AND client_id=$2`,
+      [id, client_id]
+    );
+    if (!rows.length) return res.status(404).json({ error: "Not found" });
+    if (rows[0].status !== "pending") {
+      return res.status(400).json({ error: "Can only approve pending requests" });
+    }
+    const now = Date.now();
+    await pool.query(
+      `UPDATE hr_leave_requests SET status='approved', approved_by=$1, approved_at=$2, updated_at=$2 WHERE id=$3`,
+      [uid, now, id]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error("POST /hr/leaves/:id/approve error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/**
+ * POST /hr/leaves/:id/reject — Admin rejects a leave request
+ */
+router.post("/leaves/:id/reject", async (req, res) => {
+  if (!requireAdmin(req, res)) return;
+  try {
+    const { client_id } = req.user;
+    const { id } = req.params;
+    const { reason } = req.body;
+    const { rows } = await pool.query(
+      `SELECT * FROM hr_leave_requests WHERE id=$1 AND client_id=$2`,
+      [id, client_id]
+    );
+    if (!rows.length) return res.status(404).json({ error: "Not found" });
+    if (rows[0].status !== "pending") {
+      return res.status(400).json({ error: "Can only reject pending requests" });
+    }
+    await pool.query(
+      `UPDATE hr_leave_requests SET status='rejected', rejection_reason=$1, updated_at=$2 WHERE id=$3`,
+      [reason || null, Date.now(), id]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error("POST /hr/leaves/:id/reject error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/**
+ * GET /hr/leaves/balance/:employeeId — Get leave balance summary
+ * Accessible by admin or the employee themselves
+ */
+router.get("/leaves/balance/:employeeId", async (req, res) => {
+  try {
+    const { client_id, role, type, hr_employee_id } = req.user;
+    const empId = parseInt(req.params.employeeId);
+
+    // Only admin or the employee themselves
+    if (role !== "admin" && (type !== "hr_employee" || hr_employee_id !== empId)) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    const year = new Date().getFullYear();
+    const yearStart = `${year}-01-01`;
+    const yearEnd = `${year}-12-31`;
+
+    const { rows } = await pool.query(
+      `SELECT leave_type, 
+              COALESCE(SUM(duration_days), 0) AS used_days
+       FROM hr_leave_requests
+       WHERE employee_id=$1 AND client_id=$2 
+         AND status='approved'
+         AND start_date >= $3 AND start_date <= $4
+       GROUP BY leave_type`,
+      [empId, client_id, yearStart, yearEnd]
+    );
+
+    const annualUsed = Number(rows.find(r => r.leave_type === 'annual')?.used_days || 0);
+    const sickUsed = Number(rows.find(r => r.leave_type === 'sick')?.used_days || 0);
+
+    res.json({
+      year,
+      annual: { quota: 14, used: annualUsed, remaining: 14 - annualUsed },
+      sick: { quota: 14, used: sickUsed, remaining: 14 - sickUsed },
+    });
+  } catch (err) {
+    console.error("GET /hr/leaves/balance error:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
 export default router;

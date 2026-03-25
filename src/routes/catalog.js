@@ -397,8 +397,8 @@ function mapService(row) {
     currency: row.currency || "JOD",
     active: row.active !== false,
     clientId: row.client_id,
-    createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now(),
-    updatedAt: row.updated_at ? new Date(row.updated_at).getTime() : Date.now(),
+    createdAt: row.created_at ? Number(row.created_at) : Date.now(),
+    updatedAt: row.updated_at ? Number(row.updated_at) : Date.now(),
   };
 }
 
@@ -416,8 +416,8 @@ function mapMedication(row) {
     notes: row.notes || "",
     active: row.active !== false,
     clientId: row.client_id,
-    createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now(),
-    updatedAt: row.updated_at ? new Date(row.updated_at).getTime() : Date.now(),
+    createdAt: row.created_at ? Number(row.created_at) : Date.now(),
+    updatedAt: row.updated_at ? Number(row.updated_at) : Date.now(),
   };
 }
 

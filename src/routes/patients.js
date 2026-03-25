@@ -78,9 +78,9 @@ function mapPatientRow(row) {
           reasonForVisit: row.notes || "",
         },
     history: Array.isArray(history) ? history : [],
-    createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now(),
+    createdAt: row.created_at ? Number(row.created_at) : Date.now(),
     createdBy: row.created_by || "system",
-    updatedAt: row.updated_at ? new Date(row.updated_at).getTime() : Date.now(),
+    updatedAt: row.updated_at ? Number(row.updated_at) : Date.now(),
     updatedBy: row.updated_by || "system",
     isArchived: row.is_archived || false,
   };

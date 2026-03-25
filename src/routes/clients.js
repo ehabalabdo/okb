@@ -120,14 +120,16 @@ router.post("/:id/owner", requireSuperAdmin, async (req, res) => {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
+    const uid = 'admin_' + Date.now();
+    const now = Date.now();
     const { rows } = await pool.query(
-      `INSERT INTO users (full_name, email, password, role, client_id, created_at, updated_at, created_by, updated_by, is_active, is_archived)
-       VALUES ($1, $2, $3, 'admin', $4, NOW(), NOW(), 'super_admin', 'super_admin', true, false)
-       RETURNING id`,
-      [name, email, hashedPassword, clientId]
+      `INSERT INTO users (uid, name, email, password, role, client_id, created_at, updated_at, created_by, updated_by, is_active, is_archived)
+       VALUES ($1, $2, $3, $4, 'admin', $5, $6, $7, 'super_admin', 'super_admin', true, false)
+       RETURNING uid`,
+      [uid, name, email, hashedPassword, clientId, now, now]
     );
 
-    const userId = rows[0].id;
+    const userId = rows[0].uid;
     await pool.query("UPDATE clients SET owner_user_id=$1 WHERE id=$2", [
       userId,
       clientId,
@@ -384,39 +386,74 @@ router.delete("/:id", requireSuperAdmin, async (req, res) => {
     // Delete in dependency order (HR tables first, then core tables)
     if (client) {
       await client.query("BEGIN");
-      // HR module tables
+      // HR module tables (dependency order: children first)
       await client.query("DELETE FROM hr_webauthn_challenges WHERE employee_id IN (SELECT id FROM hr_employees WHERE client_id=$1)", [clientId]);
       await client.query("DELETE FROM hr_biometric_credentials WHERE employee_id IN (SELECT id FROM hr_employees WHERE client_id=$1)", [clientId]);
-      await client.query("DELETE FROM hr_leave_requests WHERE client_id=$1", [clientId]);
       await client.query("DELETE FROM hr_payslips WHERE client_id=$1", [clientId]);
+      await client.query("DELETE FROM hr_payroll_runs WHERE client_id=$1", [clientId]);
       await client.query("DELETE FROM hr_attendance_events WHERE client_id=$1", [clientId]);
       await client.query("DELETE FROM hr_attendance WHERE client_id=$1", [clientId]);
-      await client.query("DELETE FROM hr_deduction_types WHERE client_id=$1", [clientId]);
-      await client.query("DELETE FROM hr_schedules WHERE client_id=$1", [clientId]);
+      await client.query("DELETE FROM hr_deductions WHERE client_id=$1", [clientId]);
+      await client.query("DELETE FROM hr_warnings WHERE client_id=$1", [clientId]);
+      await client.query("DELETE FROM hr_notifications WHERE client_id=$1", [clientId]);
+      await client.query("DELETE FROM hr_work_schedules WHERE client_id=$1", [clientId]);
+      await client.query("DELETE FROM hr_social_security_settings WHERE client_id=$1", [clientId]);
       await client.query("DELETE FROM hr_employees WHERE client_id=$1", [clientId]);
-      // Core tables
-      await client.query("DELETE FROM device_results WHERE client_id=$1", [clientId]);
-      await client.query("DELETE FROM device_api_keys WHERE client_id=$1", [clientId]);
-      await client.query("DELETE FROM devices WHERE client_id=$1", [clientId]);
+      // ENT forms
+      await client.query("DELETE FROM ent_audiograms WHERE client_id=$1", [clientId]);
+      await client.query("DELETE FROM ent_balance_assessments WHERE client_id=$1", [clientId]);
+      await client.query("DELETE FROM ent_follow_up_forms WHERE client_id=$1", [clientId]);
+      await client.query("DELETE FROM ent_new_patient_forms WHERE client_id=$1", [clientId]);
+      await client.query("DELETE FROM ent_referrals WHERE client_id=$1", [clientId]);
+      // Courses
+      await client.query("DELETE FROM course_students WHERE course_id IN (SELECT id FROM courses WHERE client_id=$1)", [clientId]);
+      await client.query("DELETE FROM course_sessions WHERE course_id IN (SELECT id FROM courses WHERE client_id=$1)", [clientId]);
+      await client.query("DELETE FROM courses WHERE client_id=$1", [clientId]);
+      // Invoices & payments
+      await client.query("DELETE FROM invoice_payments WHERE invoice_id IN (SELECT id FROM invoices WHERE client_id=$1)", [clientId]);
+      await client.query("DELETE FROM invoice_audit_log WHERE invoice_id IN (SELECT id FROM invoices WHERE client_id=$1)", [clientId]);
       await client.query("DELETE FROM invoices WHERE client_id=$1", [clientId]);
+      // Devices
+      await client.query("DELETE FROM device_results WHERE client_id=$1", [clientId]);
+      await client.query("DELETE FROM devices WHERE client_id=$1", [clientId]);
+      // Lab & implants
+      await client.query("DELETE FROM lab_cases WHERE client_id=$1", [clientId]);
+      await client.query("DELETE FROM implant_orders WHERE client_id=$1", [clientId]);
+      await client.query("DELETE FROM implant_inventory WHERE client_id=$1", [clientId]);
+      // Catalog
+      await client.query("DELETE FROM clinic_services WHERE client_id=$1", [clientId]);
+      await client.query("DELETE FROM clinic_medications WHERE client_id=$1", [clientId]);
+      // Core tables
+      await client.query("DELETE FROM notifications WHERE client_id=$1", [clientId]);
       await client.query("DELETE FROM appointments WHERE client_id=$1", [clientId]);
       await client.query("DELETE FROM patients WHERE client_id=$1", [clientId]);
       await client.query("DELETE FROM users WHERE client_id=$1", [clientId]);
       await client.query("DELETE FROM clinics WHERE client_id=$1", [clientId]);
+      await client.query("DELETE FROM system_settings WHERE client_id=$1", [clientId]);
       await client.query("DELETE FROM clients WHERE id=$1", [clientId]);
       await client.query("COMMIT");
     } else {
       // Fallback: sequential deletes without transaction
-      for (const table of [
-        "hr_leave_requests", "hr_payslips", "hr_attendance_events",
-        "hr_attendance", "hr_deduction_types", "hr_schedules", "hr_employees",
-        "device_results", "device_api_keys", "devices",
-        "invoices", "appointments", "patients", "users", "clinics",
-      ]) {
+      const tables = [
+        "hr_webauthn_challenges", "hr_biometric_credentials",
+        "hr_payslips", "hr_payroll_runs", "hr_attendance_events",
+        "hr_attendance", "hr_deductions", "hr_warnings", "hr_notifications",
+        "hr_work_schedules", "hr_social_security_settings", "hr_employees",
+        "ent_audiograms", "ent_balance_assessments", "ent_follow_up_forms",
+        "ent_new_patient_forms", "ent_referrals",
+        "course_students", "course_sessions", "courses",
+        "invoice_payments", "invoice_audit_log", "invoices",
+        "device_results", "devices",
+        "lab_cases", "implant_orders", "implant_inventory",
+        "clinic_services", "clinic_medications",
+        "notifications", "appointments", "patients", "users", "clinics",
+        "system_settings",
+      ];
+      for (const table of tables) {
         try {
           await pool.query(`DELETE FROM ${table} WHERE client_id=$1`, [clientId]);
         } catch (e) {
-          // Table may not exist, skip
+          // Table may not exist or column not applicable, skip
         }
       }
       await pool.query("DELETE FROM clients WHERE id=$1", [clientId]);

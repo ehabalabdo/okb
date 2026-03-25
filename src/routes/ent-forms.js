@@ -276,7 +276,7 @@ router.post("/referral", async (req, res) => {
       ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, NOW(), NOW())
       RETURNING *`,
       [
-        patientId, client_id, referringDoctor || 'د. طارق خريس',
+        patientId, client_id, referringDoctor || '',
         referredToSpecialty || '', referredToDoctor || '', referredToHospital || '',
         JSON.stringify(clinicalInfo || {}), urgency || 'routine',
         notes || '', req.user.uid || 'system'

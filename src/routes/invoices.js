@@ -27,9 +27,9 @@ function mapInvoiceRow(row) {
     paidAmount: parseFloat(row.paid_amount),
     paymentMethod: row.payment_method,
     status: row.status,
-    createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now(),
+    createdAt: row.created_at ? Number(row.created_at) : Date.now(),
     createdBy: row.created_by || "system",
-    updatedAt: row.updated_at ? new Date(row.updated_at).getTime() : Date.now(),
+    updatedAt: row.updated_at ? Number(row.updated_at) : Date.now(),
     updatedBy: row.updated_by || "system",
     isArchived: false,
   };
@@ -126,9 +126,14 @@ router.put("/:id", async (req, res) => {
       status,
     } = req.body;
 
-    const sets = [`updated_at=${Date.now()}`, `updated_by='${(req.user.id || req.user.username || 'system').toString().replace(/'/g, "''")}'`];
+    const sets = [];
     const params = [];
     let idx = 1;
+
+    sets.push(`updated_at=$${idx++}`);
+    params.push(Date.now());
+    sets.push(`updated_by=$${idx++}`);
+    params.push(String(req.user.id || req.user.username || 'system'));
 
     if (items !== undefined) {
       sets.push(`items=$${idx++}::jsonb`);

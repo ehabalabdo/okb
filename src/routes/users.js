@@ -46,11 +46,11 @@ router.get("/", async (req, res) => {
         clientId: row.client_id,
         isActive: row.is_active !== false,
         createdAt: row.created_at
-          ? new Date(row.created_at).getTime()
+          ? Number(row.created_at)
           : Date.now(),
         createdBy: row.created_by || "system",
         updatedAt: row.updated_at
-          ? new Date(row.updated_at).getTime()
+          ? Number(row.updated_at)
           : Date.now(),
         updatedBy: row.updated_by || "system",
         isArchived: row.is_archived || false,

@@ -28,6 +28,7 @@ function mapInvoiceRow(row) {
     paymentMethod: row.payment_method,
     status: row.status,
     createdAt: row.created_at ? Number(row.created_at) : Date.now(),
+    created_at: row.created_at,
     createdBy: row.created_by || "system",
     updatedAt: row.updated_at ? Number(row.updated_at) : Date.now(),
     updatedBy: row.updated_by || "system",

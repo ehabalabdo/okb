@@ -70,12 +70,12 @@ function mapPatientRow(row) {
     currentVisit: currentVisit && Object.keys(currentVisit).length > 0
       ? currentVisit
       : {
-          visitId: `v_${row.id}_${Date.now()}`,
+          visitId: "",
           clinicId: "",
           date: Date.now(),
-          status: "waiting",
+          status: "",
           priority: "normal",
-          reasonForVisit: row.notes || "",
+          reasonForVisit: "",
         },
     history: Array.isArray(history) ? history : [],
     createdAt: row.created_at ? Number(row.created_at) : Date.now(),

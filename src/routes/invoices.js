@@ -7,7 +7,7 @@ router.use(auth);
 
 // Only staff can access invoices (not patients or HR employees)
 function requireStaffRole(req, res, next) {
-  const allowedRoles = ["admin", "doctor", "secretary", "super_admin"];
+  const allowedRoles = ["admin", "doctor", "secretary", "super_admin", "accountant", "senior_accountant"];
   if (!allowedRoles.includes(req.user.role) && req.user.type !== "super_admin") {
     return res.status(403).json({ error: "Access denied" });
   }
@@ -39,16 +39,42 @@ function mapInvoiceRow(row) {
 /**
  * GET /invoices
  * List all invoices for the current client
+ * For senior_accountant: apply overlays from invoice_overrides
  */
 router.get("/", async (req, res) => {
   try {
-    const { client_id } = req.user;
+    const { client_id, role } = req.user;
     const query = client_id
       ? "SELECT * FROM invoices WHERE client_id=$1 ORDER BY created_at DESC"
       : "SELECT * FROM invoices ORDER BY created_at DESC";
     const params = client_id ? [client_id] : [];
     const { rows } = await pool.query(query, params);
-    res.json(rows.map(mapInvoiceRow));
+    let invoices = rows.map(mapInvoiceRow);
+
+    // For senior_accountant: apply overlay (edited/deleted invoices)
+    if (role === "senior_accountant") {
+      const overridesQuery = client_id
+        ? "SELECT * FROM invoice_overrides WHERE client_id=$1"
+        : "SELECT * FROM invoice_overrides";
+      const overridesParams = client_id ? [client_id] : [];
+      const { rows: overrides } = await pool.query(overridesQuery, overridesParams);
+      const overrideMap = {};
+      for (const ov of overrides) {
+        overrideMap[ov.invoice_id] = ov;
+      }
+      invoices = invoices
+        .filter(inv => !overrideMap[inv.id]?.is_deleted)
+        .map(inv => {
+          const ov = overrideMap[inv.id];
+          if (ov && ov.override_data) {
+            const data = typeof ov.override_data === "string" ? JSON.parse(ov.override_data) : ov.override_data;
+            return { ...inv, ...data };
+          }
+          return inv;
+        });
+    }
+
+    res.json(invoices);
   } catch (err) {
     console.error("GET /invoices error:", err);
     res.status(500).json({ error: "Server error" });
@@ -114,11 +140,46 @@ router.post("/", async (req, res) => {
 /**
  * PUT /invoices/:id
  * Update invoice fields
+ * accountant: blocked (read-only)
+ * senior_accountant: writes to invoice_overrides (overlay)
  */
 router.put("/:id", async (req, res) => {
   try {
-    const { client_id } = req.user;
+    const { client_id, role } = req.user;
     const invoiceId = req.params.id;
+
+    // Accountant is read-only
+    if (role === "accountant") {
+      return res.status(403).json({ error: "Read-only access" });
+    }
+
+    // Senior accountant: save to overlay table instead of real data
+    if (role === "senior_accountant") {
+      const { items, totalAmount, total_amount, paidAmount, paid_amount, paymentMethod, payment_method, status } = req.body;
+      const overrideData = {};
+      if (items !== undefined) {
+        overrideData.items = items;
+        overrideData.totalAmount = items.reduce((s, i) => s + (parseFloat(i.price) || 0), 0);
+      }
+      const total = totalAmount !== undefined ? totalAmount : total_amount;
+      if (total !== undefined && items === undefined) overrideData.totalAmount = total;
+      const paid = paidAmount !== undefined ? paidAmount : paid_amount;
+      if (paid !== undefined) overrideData.paidAmount = paid;
+      const method = paymentMethod !== undefined ? paymentMethod : payment_method;
+      if (method !== undefined) overrideData.paymentMethod = method;
+      if (status !== undefined) overrideData.status = status;
+
+      const cid = client_id || 0;
+      const userId = req.user.id || req.user.username || "system";
+      await pool.query(
+        `INSERT INTO invoice_overrides (invoice_id, client_id, override_data, modified_by, updated_at)
+         VALUES ($1, $2, $3::jsonb, $4, NOW())
+         ON CONFLICT (invoice_id, client_id)
+         DO UPDATE SET override_data = $3::jsonb, modified_by = $4, updated_at = NOW()`,
+        [invoiceId, cid, JSON.stringify(overrideData), userId]
+      );
+      return res.json({ success: true });
+    }
 
     const {
       items, totalAmount, total_amount,
@@ -213,10 +274,33 @@ router.put("/:id", async (req, res) => {
 /**
  * DELETE /invoices/:id
  * Delete an invoice
+ * accountant: blocked
+ * senior_accountant: marks as deleted in overlay only
  */
 router.delete("/:id", async (req, res) => {
   try {
     const { role, client_id } = req.user;
+
+    // Accountant is read-only
+    if (role === "accountant") {
+      return res.status(403).json({ error: "Read-only access" });
+    }
+
+    // Senior accountant: overlay delete (mark as deleted, don't touch real data)
+    if (role === "senior_accountant") {
+      const invoiceId = req.params.id;
+      const cid = client_id || 0;
+      const userId = req.user.id || req.user.username || "system";
+      await pool.query(
+        `INSERT INTO invoice_overrides (invoice_id, client_id, is_deleted, modified_by, updated_at)
+         VALUES ($1, $2, true, $3, NOW())
+         ON CONFLICT (invoice_id, client_id)
+         DO UPDATE SET is_deleted = true, modified_by = $3, updated_at = NOW()`,
+        [invoiceId, cid, userId]
+      );
+      return res.json({ success: true });
+    }
+
     if (!["admin", "super_admin"].includes(role)) {
       return res.status(403).json({ error: "Forbidden" });
     }

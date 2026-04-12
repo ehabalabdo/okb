@@ -7,11 +7,6 @@ router.use(auth);
 
 /**
  * Map a DB row to frontend-compatible Appointment shape.
- *
- * DB columns: id(varchar), patient_id(varchar), patient_name(varchar),
- *   clinic_id(varchar), doctor_id(varchar), date(bigint epoch-ms),
- *   reason(text), status(varchar), client_id(int),
- *   created_at(bigint), created_by(varchar), updated_at(bigint), updated_by(varchar)
  */
 function mapAppointmentRow(row) {
   return {
@@ -48,30 +43,13 @@ function weekRange() {
 
 /**
  * GET /appointments
- * List all appointments for the current client
+ * List all appointments
  */
 router.get("/", async (req, res) => {
   try {
-    const { client_id, role, patient_id } = req.user;
-
-    let query, params;
-
-    if (req.user.type === "patient") {
-      query = client_id
-        ? "SELECT * FROM appointments WHERE patient_id=$1 AND client_id=$2 ORDER BY date DESC"
-        : "SELECT * FROM appointments WHERE patient_id=$1 ORDER BY date DESC";
-      params = client_id ? [patient_id, client_id] : [patient_id];
-    } else if (client_id) {
-      query = "SELECT * FROM appointments WHERE client_id=$1 ORDER BY date DESC";
-      params = [client_id];
-    } else if (req.user.type === "super_admin") {
-      query = "SELECT * FROM appointments ORDER BY date DESC LIMIT 500";
-      params = [];
-    } else {
-      return res.status(403).json({ error: "client_id required" });
-    }
-
-    const { rows } = await pool.query(query, params);
+    const { rows } = await pool.query(
+      "SELECT * FROM appointments ORDER BY date DESC"
+    );
     res.json(rows.map(mapAppointmentRow));
   } catch (err) {
     console.error("GET /appointments error:", err);
@@ -85,14 +63,10 @@ router.get("/", async (req, res) => {
 router.get("/by-patient/:patientId", async (req, res) => {
   try {
     const patientId = req.params.patientId;
-    const { client_id } = req.user;
-
-    const query = client_id
-      ? "SELECT * FROM appointments WHERE patient_id=$1 AND client_id=$2 ORDER BY date DESC"
-      : "SELECT * FROM appointments WHERE patient_id=$1 ORDER BY date DESC";
-    const params = client_id ? [patientId, client_id] : [patientId];
-    const { rows } = await pool.query(query, params);
-
+    const { rows } = await pool.query(
+      "SELECT * FROM appointments WHERE patient_id=$1 ORDER BY date DESC",
+      [patientId]
+    );
     res.json(rows.map(mapAppointmentRow));
   } catch (err) {
     console.error("GET /appointments/by-patient error:", err);
@@ -105,7 +79,7 @@ router.get("/by-patient/:patientId", async (req, res) => {
  */
 router.get("/today", async (req, res) => {
   try {
-    const { role, uid, client_id } = req.user;
+    const { role, uid } = req.user;
     const { start, end } = todayRange();
 
     if (role === "doctor") {
@@ -117,11 +91,10 @@ router.get("/today", async (req, res) => {
     }
 
     if (["admin", "receptionist", "secretary"].includes(role)) {
-      const query = client_id
-        ? "SELECT * FROM appointments WHERE client_id=$1 AND date >= $2 AND date < $3 ORDER BY date"
-        : "SELECT * FROM appointments WHERE date >= $1 AND date < $2 ORDER BY date";
-      const params = client_id ? [client_id, start, end] : [start, end];
-      const { rows } = await pool.query(query, params);
+      const { rows } = await pool.query(
+        "SELECT * FROM appointments WHERE date >= $1 AND date < $2 ORDER BY date",
+        [start, end]
+      );
       return res.json(rows.map(mapAppointmentRow));
     }
 
@@ -137,16 +110,20 @@ router.get("/today", async (req, res) => {
  */
 router.get("/week", async (req, res) => {
   try {
-    const { role, uid, client_id } = req.user;
+    const { role, uid } = req.user;
     const { start, end } = weekRange();
 
-    const isDoctor = role === "doctor";
-    const filterCol = isDoctor ? "doctor_id" : "client_id";
-    const filterVal = isDoctor ? uid : client_id;
+    if (role === "doctor") {
+      const { rows } = await pool.query(
+        "SELECT * FROM appointments WHERE doctor_id=$1 AND date >= $2 AND date < $3 ORDER BY date",
+        [uid, start, end]
+      );
+      return res.json(rows.map(mapAppointmentRow));
+    }
 
     const { rows } = await pool.query(
-      `SELECT * FROM appointments WHERE ${filterCol}=$1 AND date >= $2 AND date < $3 ORDER BY date`,
-      [filterVal, start, end]
+      "SELECT * FROM appointments WHERE date >= $1 AND date < $2 ORDER BY date",
+      [start, end]
     );
     res.json(rows.map(mapAppointmentRow));
   } catch (err) {
@@ -163,18 +140,21 @@ router.get("/day", async (req, res) => {
     const { date } = req.query;
     if (!date) return res.status(400).json({ error: "date required" });
 
-    const { role, uid, client_id } = req.user;
-
+    const { role, uid } = req.user;
     const dayStart = new Date(date + "T00:00:00").getTime();
     const dayEnd = dayStart + 86400000;
 
-    const isDoctor = role === "doctor";
-    const filterCol = isDoctor ? "doctor_id" : "client_id";
-    const filterVal = isDoctor ? uid : client_id;
+    if (role === "doctor") {
+      const { rows } = await pool.query(
+        "SELECT * FROM appointments WHERE doctor_id=$1 AND date >= $2 AND date < $3 ORDER BY date",
+        [uid, dayStart, dayEnd]
+      );
+      return res.json(rows.map(mapAppointmentRow));
+    }
 
     const { rows } = await pool.query(
-      `SELECT * FROM appointments WHERE ${filterCol}=$1 AND date >= $2 AND date < $3 ORDER BY date`,
-      [filterVal, dayStart, dayEnd]
+      "SELECT * FROM appointments WHERE date >= $1 AND date < $2 ORDER BY date",
+      [dayStart, dayEnd]
     );
     res.json(rows.map(mapAppointmentRow));
   } catch (err) {
@@ -189,8 +169,8 @@ router.get("/day", async (req, res) => {
  */
 router.post("/", async (req, res) => {
   try {
-    const { role, client_id, uid: userId } = req.user;
-    if (!["admin", "receptionist", "secretary", "doctor", "super_admin"].includes(role)) {
+    const { role, uid: userId } = req.user;
+    if (!["admin", "receptionist", "secretary", "doctor"].includes(role)) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
@@ -208,7 +188,6 @@ router.post("/", async (req, res) => {
     const cId = String(clinic_id || clinicId || "");
     const pName = patient_name || patientName || "";
 
-    // Convert to epoch-ms (bigint)
     let dateEpoch;
     if (date !== undefined) {
       dateEpoch = typeof date === "number" ? date : new Date(date).getTime();
@@ -225,13 +204,13 @@ router.post("/", async (req, res) => {
 
     const { rows } = await pool.query(
       `INSERT INTO appointments
-       (id, patient_id, patient_name, clinic_id, doctor_id, date, status, reason, client_id,
+       (id, patient_id, patient_name, clinic_id, doctor_id, date, status, reason,
         created_at, created_by, updated_at, updated_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
        RETURNING *`,
       [
         appointmentId, pId, pName, cId, dId, dateEpoch,
-        status || "scheduled", reason || "", client_id,
+        status || "scheduled", reason || "",
         now, userId || "system", now, userId || "system",
       ]
     );
@@ -253,10 +232,10 @@ router.post("/", async (req, res) => {
 router.put("/:id", async (req, res) => {
   try {
     const role = req.user.role || req.user.type;
-    if (!["admin", "receptionist", "secretary", "doctor", "super_admin"].includes(role)) {
+    if (!["admin", "receptionist", "secretary", "doctor"].includes(role)) {
       return res.status(403).json({ error: "Forbidden" });
     }
-    const { client_id, uid: userId } = req.user;
+    const { uid: userId } = req.user;
     const appointmentId = req.params.id;
 
     const {
@@ -303,11 +282,7 @@ router.put("/:id", async (req, res) => {
     params.push(userId || "system");
 
     params.push(appointmentId);
-    let whereClause = `id=$${idx++}`;
-    if (client_id) {
-      params.push(client_id);
-      whereClause += ` AND client_id=$${idx++}`;
-    }
+    const whereClause = `id=$${idx++}`;
 
     await pool.query(
       `UPDATE appointments SET ${sets.join(", ")} WHERE ${whereClause}`,
@@ -326,24 +301,20 @@ router.put("/:id", async (req, res) => {
  */
 router.put("/:id/status", async (req, res) => {
   try {
-    const { role, uid: userId, client_id } = req.user;
+    const { role, uid: userId } = req.user;
     const { status } = req.body;
 
-    if (!["admin", "doctor", "receptionist", "secretary", "super_admin"].includes(role)) {
+    if (!["admin", "doctor", "receptionist", "secretary"].includes(role)) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
     const now = Date.now();
     const appointmentId = req.params.id;
 
-    const query = client_id
-      ? "UPDATE appointments SET status=$1, updated_by=$2, updated_at=$3 WHERE id=$4 AND client_id=$5"
-      : "UPDATE appointments SET status=$1, updated_by=$2, updated_at=$3 WHERE id=$4";
-    const params = client_id
-      ? [status, userId, now, appointmentId, client_id]
-      : [status, userId, now, appointmentId];
-
-    await pool.query(query, params);
+    await pool.query(
+      "UPDATE appointments SET status=$1, updated_by=$2, updated_at=$3 WHERE id=$4",
+      [status, userId, now, appointmentId]
+    );
     res.json({ success: true });
   } catch (err) {
     console.error("PUT /appointments/:id/status error:", err);
@@ -356,18 +327,13 @@ router.put("/:id/status", async (req, res) => {
  */
 router.delete("/:id", async (req, res) => {
   try {
-    const { role, client_id } = req.user;
-    if (!["admin", "receptionist", "secretary", "super_admin"].includes(role)) {
+    const { role } = req.user;
+    if (!["admin", "receptionist", "secretary"].includes(role)) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
     const appointmentId = req.params.id;
-    const query = client_id
-      ? "DELETE FROM appointments WHERE id=$1 AND client_id=$2"
-      : "DELETE FROM appointments WHERE id=$1";
-    const params = client_id ? [appointmentId, client_id] : [appointmentId];
-
-    await pool.query(query, params);
+    await pool.query("DELETE FROM appointments WHERE id=$1", [appointmentId]);
     res.json({ success: true });
   } catch (err) {
     console.error("DELETE /appointments/:id error:", err);

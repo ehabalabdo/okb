@@ -88,16 +88,11 @@ function mapPatientRow(row) {
 
 /**
  * GET /patients
- * List all patients for the current client
+ * List all patients
  */
 router.get("/", async (req, res) => {
   try {
-    const { client_id } = req.user;
-    const query = client_id
-      ? "SELECT * FROM patients WHERE client_id=$1 ORDER BY id DESC"
-      : "SELECT * FROM patients ORDER BY id DESC";
-    const params = client_id ? [client_id] : [];
-    const { rows } = await pool.query(query, params);
+    const { rows } = await pool.query("SELECT * FROM patients ORDER BY id DESC");
     res.json(rows.map(mapPatientRow));
   } catch (err) {
     console.error("GET /patients error:", err);
@@ -112,19 +107,10 @@ router.get("/", async (req, res) => {
 router.get("/:id", async (req, res) => {
   try {
     const patientId = req.params.id;
-
-    const { client_id, type, patient_id } = req.user;
-
-    // Patients can only view their own record
-    if (type === "patient" && String(patient_id) !== String(patientId)) {
-      return res.status(403).json({ error: "Forbidden" });
-    }
-
-    const query = client_id
-      ? "SELECT * FROM patients WHERE id=$1 AND client_id=$2 LIMIT 1"
-      : "SELECT * FROM patients WHERE id=$1 LIMIT 1";
-    const params = client_id ? [patientId, client_id] : [patientId];
-    const { rows } = await pool.query(query, params);
+    const { rows } = await pool.query(
+      "SELECT * FROM patients WHERE id=$1 LIMIT 1",
+      [patientId]
+    );
 
     if (rows.length === 0) {
       return res.status(404).json({ error: "Patient not found" });
@@ -139,12 +125,11 @@ router.get("/:id", async (req, res) => {
 /**
  * POST /patients
  * Create a new patient
- * Admin/Receptionist/Doctor only
  */
 router.post("/", async (req, res) => {
   try {
-    const { role, client_id } = req.user;
-    if (!["admin", "receptionist", "secretary", "doctor", "super_admin"].includes(role)) {
+    const { role } = req.user;
+    if (!["admin", "receptionist", "secretary", "doctor"].includes(role)) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
@@ -161,7 +146,6 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "full_name required" });
     }
 
-    // Auto-generate credentials if not provided
     let finalUsername = username || (phone ? makeUsername(phone) : null);
     let plainPassword = password || makePassword();
     let hashedPassword = await bcrypt.hash(plainPassword, 10);
@@ -179,10 +163,10 @@ router.post("/", async (req, res) => {
         `INSERT INTO patients (
           id, full_name, age, date_of_birth, gender, phone, username, email, password, has_access,
           notes, medical_profile, current_visit, history,
-          client_id, created_at, updated_at, created_by, updated_by, is_archived
+          created_at, updated_at, created_by, updated_by, is_archived
         )
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14::jsonb,
-                $15, NOW(), NOW(), 'system', 'system', false)
+                NOW(), NOW(), 'system', 'system', false)
         RETURNING id, full_name, phone, username`,
         [
           patientId,
@@ -190,7 +174,6 @@ router.post("/", async (req, res) => {
           finalUsername, email || null, hashedPassword, access,
           notes || medProfile?.notes || "",
           JSON.stringify(medProfile), JSON.stringify(visit), JSON.stringify(hist),
-          client_id,
         ]
       );
 
@@ -206,7 +189,6 @@ router.post("/", async (req, res) => {
       });
     } catch (err) {
       if (err.code === "23505" && finalUsername) {
-        // Duplicate username — append random suffix
         finalUsername = finalUsername + "-" + Math.floor(1000 + Math.random() * 9000);
         plainPassword = makePassword();
         hashedPassword = await bcrypt.hash(plainPassword, 10);
@@ -215,10 +197,10 @@ router.post("/", async (req, res) => {
           `INSERT INTO patients (
             id, full_name, age, date_of_birth, gender, phone, username, email, password, has_access,
             notes, medical_profile, current_visit, history,
-            client_id, created_at, updated_at, created_by, updated_by, is_archived
+            created_at, updated_at, created_by, updated_by, is_archived
           )
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14::jsonb,
-                  $15, NOW(), NOW(), 'system', 'system', false)
+                  NOW(), NOW(), 'system', 'system', false)
           RETURNING id, full_name, phone, username`,
           [
             retryPatientId,
@@ -226,7 +208,6 @@ router.post("/", async (req, res) => {
             finalUsername, email || null, hashedPassword, access,
             notes || medProfile?.notes || "",
             JSON.stringify(medProfile), JSON.stringify(visit), JSON.stringify(hist),
-            client_id,
           ]
         );
         return res.status(201).json({
@@ -248,13 +229,7 @@ router.post("/", async (req, res) => {
  */
 router.put("/:id", async (req, res) => {
   try {
-    const { role, client_id, type, patient_id: callerPatientId } = req.user;
-
-    // Patients can only update their own record (limited fields)
     const patientId = req.params.id;
-    if (type === "patient" && String(callerPatientId) !== String(patientId)) {
-      return res.status(403).json({ error: "Forbidden" });
-    }
 
     const {
       full_name, name, phone, email, gender, date_of_birth, dateOfBirth,
@@ -330,13 +305,8 @@ router.put("/:id", async (req, res) => {
       params.push(JSON.stringify(history));
     }
 
-    // WHERE clause
     params.push(patientId);
-    let whereClause = `id=$${idx++}`;
-    if (client_id) {
-      params.push(client_id);
-      whereClause += ` AND client_id=$${idx++}`;
-    }
+    const whereClause = `id=$${idx++}`;
 
     await pool.query(
       `UPDATE patients SET ${sets.join(", ")} WHERE ${whereClause}`,
@@ -356,18 +326,13 @@ router.put("/:id", async (req, res) => {
  */
 router.delete("/:id", async (req, res) => {
   try {
-    const { role, client_id } = req.user;
-    if (!["admin", "super_admin"].includes(role)) {
+    const { role } = req.user;
+    if (role !== "admin") {
       return res.status(403).json({ error: "Forbidden" });
     }
 
     const patientId = req.params.id;
-    const query = client_id
-      ? "DELETE FROM patients WHERE id=$1 AND client_id=$2"
-      : "DELETE FROM patients WHERE id=$1";
-    const params = client_id ? [patientId, client_id] : [patientId];
-    await pool.query(query, params);
-
+    await pool.query("DELETE FROM patients WHERE id=$1", [patientId]);
     res.json({ success: true });
   } catch (err) {
     console.error("DELETE /patients/:id error:", err);

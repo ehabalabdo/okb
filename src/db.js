@@ -9,7 +9,7 @@ if (!process.env.DATABASE_URL) {
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, // Neon requires SSL; self-signed cert
+  ssl: { rejectUnauthorized: false },
   max: 20,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,
@@ -23,14 +23,12 @@ pool.on("error", (err) => {
 pool.query(`
   CREATE TABLE IF NOT EXISTS invoice_overrides (
     id SERIAL PRIMARY KEY,
-    invoice_id TEXT NOT NULL,
-    client_id INTEGER NOT NULL DEFAULT 0,
+    invoice_id TEXT NOT NULL UNIQUE,
     is_deleted BOOLEAN DEFAULT false,
     override_data JSONB,
     modified_by TEXT NOT NULL DEFAULT 'system',
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    updated_at TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE(invoice_id, client_id)
+    updated_at TIMESTAMPTZ DEFAULT NOW()
   )
 `).then(() => console.log("invoice_overrides table ready"))
   .catch(err => console.error("invoice_overrides migration error:", err.message));
@@ -47,8 +45,8 @@ async function seedAccountants() {
       if (rows.length === 0) {
         const hashed = await bcryptPkg.hash(acc.password, 10);
         await pool.query(
-          `INSERT INTO users (uid, name, email, password, role, client_id, is_active)
-           VALUES ($1, $2, $3, $4, $5, 1, true)`,
+          `INSERT INTO users (uid, name, email, password, role, is_active)
+           VALUES ($1, $2, $3, $4, $5, true)`,
           [acc.uid, acc.name, acc.email, hashed, acc.role]
         );
         console.log(`Created ${acc.role} account: ${acc.name}`);

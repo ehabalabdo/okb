@@ -9,7 +9,6 @@ import reportsRouter from "./routes/reports.js";
 import patientsRouter from "./routes/patients.js";
 import usersRouter from "./routes/users.js";
 import clinicsRouter from "./routes/clinics.js";
-import clientsRouter from "./routes/clients.js";
 import invoicesRouter from "./routes/invoices.js";
 import hrRouter from "./routes/hr.js";
 import catalogRouter from "./routes/catalog.js";
@@ -27,7 +26,7 @@ app.use(globalLimiter);
 app.use(helmet());
 
 // CORS: Production origins + localhost only in dev
-const allowedOrigins = ["https://okf-nine.vercel.app", "https://okf.vercel.app"];
+const allowedOrigins = ["https://tkc-frontend.pages.dev"];
 if (process.env.NODE_ENV !== "production") {
   allowedOrigins.push("http://localhost:5173", "http://localhost:3000");
 }
@@ -52,7 +51,6 @@ app.use("/reports", reportsRouter);
 app.use("/patients", patientsRouter);
 app.use("/users", usersRouter);
 app.use("/clinics", clinicsRouter);
-app.use("/clients", clientsRouter);
 app.use("/invoices", invoicesRouter);
 app.use("/hr", hrRouter);
 app.use("/catalog", catalogRouter);

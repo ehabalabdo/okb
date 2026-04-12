@@ -8,22 +8,19 @@ router.use(auth);
 // Only admin / doctor / secretary can view reports
 function requireStaff(req, res, next) {
   const role = req.user.role;
-  if (!["admin", "doctor", "secretary"].includes(role) && req.user.type !== "super_admin") {
+  if (!["admin", "doctor", "secretary"].includes(role)) {
     return res.status(403).json({ error: "Access denied" });
   }
   next();
 }
 router.use(requireStaff);
 
-// ضغط الأطباء (عدد المواعيد بالأسبوع)
+// Doctor load (appointments per week)
 router.get("/doctor-load", async (req, res) => {
   try {
     const { from, to } = req.query;
     if (!from || !to) return res.status(400).json({ error: "from and to query params required" });
-    const clientId = req.user.client_id;
-    if (!clientId) return res.status(400).json({ error: "No client_id associated with user" });
 
-    // from/to can be ISO dates or epoch-ms; convert to epoch-ms
     const fromMs = isNaN(Number(from)) ? new Date(from).getTime() : Number(from);
     const toMs = isNaN(Number(to)) ? new Date(to).getTime() : Number(to);
 
@@ -31,11 +28,10 @@ router.get("/doctor-load", async (req, res) => {
       `SELECT u.name AS doctor, COUNT(a.id) AS total
        FROM appointments a
        JOIN users u ON a.doctor_id = u.uid
-       WHERE a.client_id=$1
-         AND a.date BETWEEN $2 AND $3
+       WHERE a.date BETWEEN $1 AND $2
        GROUP BY u.name
        ORDER BY total DESC`,
-      [clientId, fromMs, toMs]
+      [fromMs, toMs]
     );
 
     res.json(rows);
@@ -45,13 +41,11 @@ router.get("/doctor-load", async (req, res) => {
   }
 });
 
-// الإلغاءات (Cancelled / No-show)
+// Cancellations (Cancelled / No-show)
 router.get("/cancellations", async (req, res) => {
   try {
     const { from, to } = req.query;
     if (!from || !to) return res.status(400).json({ error: "from and to query params required" });
-    const clientId = req.user.client_id;
-    if (!clientId) return res.status(400).json({ error: "No client_id associated with user" });
 
     const fromMs = isNaN(Number(from)) ? new Date(from).getTime() : Number(from);
     const toMs = isNaN(Number(to)) ? new Date(to).getTime() : Number(to);
@@ -59,11 +53,10 @@ router.get("/cancellations", async (req, res) => {
     const { rows } = await pool.query(
       `SELECT status, COUNT(*) AS total
        FROM appointments
-       WHERE client_id=$1
-         AND status IN ('cancelled','no_show')
-         AND date BETWEEN $2 AND $3
+       WHERE status IN ('cancelled','no_show')
+         AND date BETWEEN $1 AND $2
        GROUP BY status`,
-      [clientId, fromMs, toMs]
+      [fromMs, toMs]
     );
 
     res.json(rows);
@@ -73,13 +66,11 @@ router.get("/cancellations", async (req, res) => {
   }
 });
 
-// أوقات الذروة (حسب الساعة)
+// Peak hours (by hour)
 router.get("/peak-hours", async (req, res) => {
   try {
     const { from, to } = req.query;
     if (!from || !to) return res.status(400).json({ error: "from and to query params required" });
-    const clientId = req.user.client_id;
-    if (!clientId) return res.status(400).json({ error: "No client_id associated with user" });
 
     const fromMs = isNaN(Number(from)) ? new Date(from).getTime() : Number(from);
     const toMs = isNaN(Number(to)) ? new Date(to).getTime() : Number(to);
@@ -87,11 +78,10 @@ router.get("/peak-hours", async (req, res) => {
     const { rows } = await pool.query(
       `SELECT EXTRACT(HOUR FROM to_timestamp(date / 1000.0)) AS hour, COUNT(*) AS total
        FROM appointments
-       WHERE client_id=$1
-         AND date BETWEEN $2 AND $3
+       WHERE date BETWEEN $1 AND $2
        GROUP BY hour
        ORDER BY total DESC`,
-      [clientId, fromMs, toMs]
+      [fromMs, toMs]
     );
 
     res.json(rows);
@@ -103,12 +93,9 @@ router.get("/peak-hours", async (req, res) => {
 
 // ===================== FINANCIAL REPORTS =====================
 
-// ملخص مالي عام (إيرادات محصّلة، معلقة، عدد الفواتير)
+// Financial summary
 router.get("/financial-summary", async (req, res) => {
   try {
-    const clientId = req.user.client_id;
-    if (!clientId) return res.status(400).json({ error: "No client_id" });
-
     const { from, to } = req.query;
     const fromMs = from ? (isNaN(Number(from)) ? new Date(from).getTime() : Number(from)) : 0;
     const toMs = to ? (isNaN(Number(to)) ? new Date(to).getTime() : Number(to)) : Date.now();
@@ -126,9 +113,8 @@ router.get("/financial-summary", async (req, res) => {
          COUNT(CASE WHEN status = 'unpaid' THEN 1 END) AS unpaid_count,
          COUNT(CASE WHEN status = 'partial' THEN 1 END) AS partial_count
        FROM invoices
-       WHERE client_id = $1
-         AND created_at BETWEEN $2 AND $3`,
-      [clientId, fromMs, toMs]
+       WHERE created_at BETWEEN $1 AND $2`,
+      [fromMs, toMs]
     );
 
     res.json(rows[0] || {});
@@ -138,12 +124,9 @@ router.get("/financial-summary", async (req, res) => {
   }
 });
 
-// إيرادات يومية (آخر 30 يوم)
+// Daily revenue (last N days)
 router.get("/daily-revenue", async (req, res) => {
   try {
-    const clientId = req.user.client_id;
-    if (!clientId) return res.status(400).json({ error: "No client_id" });
-
     const { days } = req.query;
     const numDays = Math.min(parseInt(days) || 30, 365);
     const fromMs = Date.now() - numDays * 24 * 60 * 60 * 1000;
@@ -155,11 +138,10 @@ router.get("/daily-revenue", async (req, res) => {
          COALESCE(SUM(paid_amount), 0) AS collected,
          COUNT(*) AS invoice_count
        FROM invoices
-       WHERE client_id = $1
-         AND created_at >= $2
+       WHERE created_at >= $1
        GROUP BY day
        ORDER BY day ASC`,
-      [clientId, fromMs]
+      [fromMs]
     );
 
     res.json(rows);
@@ -169,12 +151,9 @@ router.get("/daily-revenue", async (req, res) => {
   }
 });
 
-// تقرير حسب طريقة الدفع
+// Payment methods report
 router.get("/payment-methods", async (req, res) => {
   try {
-    const clientId = req.user.client_id;
-    if (!clientId) return res.status(400).json({ error: "No client_id" });
-
     const { from, to } = req.query;
     const fromMs = from ? (isNaN(Number(from)) ? new Date(from).getTime() : Number(from)) : 0;
     const toMs = to ? (isNaN(Number(to)) ? new Date(to).getTime() : Number(to)) : Date.now();
@@ -186,11 +165,10 @@ router.get("/payment-methods", async (req, res) => {
          COALESCE(SUM(total_amount), 0) AS total,
          COALESCE(SUM(paid_amount), 0) AS collected
        FROM invoices
-       WHERE client_id = $1
-         AND created_at BETWEEN $2 AND $3
+       WHERE created_at BETWEEN $1 AND $2
        GROUP BY payment_method
        ORDER BY total DESC`,
-      [clientId, fromMs, toMs]
+      [fromMs, toMs]
     );
 
     res.json(rows);
@@ -200,17 +178,13 @@ router.get("/payment-methods", async (req, res) => {
   }
 });
 
-// أعلى الخدمات ربحاً
+// Top services by revenue
 router.get("/top-services", async (req, res) => {
   try {
-    const clientId = req.user.client_id;
-    if (!clientId) return res.status(400).json({ error: "No client_id" });
-
     const { from, to } = req.query;
     const fromMs = from ? (isNaN(Number(from)) ? new Date(from).getTime() : Number(from)) : 0;
     const toMs = to ? (isNaN(Number(to)) ? new Date(to).getTime() : Number(to)) : Date.now();
 
-    // items is JSONB array; unnest and aggregate
     const { rows } = await pool.query(
       `SELECT
          item->>'description' AS service_name,
@@ -218,13 +192,12 @@ router.get("/top-services", async (req, res) => {
          COALESCE(SUM((item->>'price')::numeric), 0) AS total
        FROM invoices,
             jsonb_array_elements(items) AS item
-       WHERE client_id = $1
-         AND items IS NOT NULL AND jsonb_typeof(items) = 'array'
-         AND created_at BETWEEN $2 AND $3
+       WHERE items IS NOT NULL AND jsonb_typeof(items) = 'array'
+         AND created_at BETWEEN $1 AND $2
        GROUP BY service_name
        ORDER BY total DESC
        LIMIT 20`,
-      [clientId, fromMs, toMs]
+      [fromMs, toMs]
     );
 
     res.json(rows);

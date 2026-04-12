@@ -9,14 +9,12 @@ router.use(auth);
 
 /**
  * GET /catalog/services
- * List all services for the current client
+ * List all services
  */
 router.get("/services", async (req, res) => {
   try {
-    const { client_id } = req.user;
     const { rows } = await pool.query(
-      `SELECT * FROM clinic_services WHERE client_id=$1 ORDER BY category, service_name`,
-      [client_id]
+      `SELECT * FROM clinic_services ORDER BY category, service_name`
     );
     res.json(rows.map(mapService));
   } catch (err) {
@@ -31,8 +29,8 @@ router.get("/services", async (req, res) => {
  */
 router.post("/services", async (req, res) => {
   try {
-    const { role, client_id } = req.user;
-    if (!["admin", "super_admin"].includes(role))
+    const { role } = req.user;
+    if (role !== "admin")
       return res.status(403).json({ error: "Forbidden" });
 
     const { serviceName, category, price, currency, active } = req.body;
@@ -41,13 +39,13 @@ router.post("/services", async (req, res) => {
       return res.status(400).json({ error: "price required and must be numeric" });
 
     const { rows } = await pool.query(
-      `INSERT INTO clinic_services (client_id, service_name, category, price, currency, active)
-       VALUES ($1,$2,$3,$4,$5,$6)
-       ON CONFLICT (client_id, service_name) DO UPDATE SET
+      `INSERT INTO clinic_services (service_name, category, price, currency, active)
+       VALUES ($1,$2,$3,$4,$5)
+       ON CONFLICT (service_name) DO UPDATE SET
          category=EXCLUDED.category, price=EXCLUDED.price, currency=EXCLUDED.currency,
          active=EXCLUDED.active, updated_at=NOW()
        RETURNING *`,
-      [client_id, serviceName, category || "General", Number(price), currency || "JOD", active !== false]
+      [serviceName, category || "General", Number(price), currency || "JOD", active !== false]
     );
     res.status(201).json(mapService(rows[0]));
   } catch (err) {
@@ -61,8 +59,8 @@ router.post("/services", async (req, res) => {
  */
 router.put("/services/:id", async (req, res) => {
   try {
-    const { role, client_id } = req.user;
-    if (!["admin", "super_admin"].includes(role))
+    const { role } = req.user;
+    if (role !== "admin")
       return res.status(403).json({ error: "Forbidden" });
 
     const id = parseInt(req.params.id);
@@ -78,9 +76,9 @@ router.put("/services/:id", async (req, res) => {
     if (currency !== undefined) { sets.push(`currency=$${idx++}`); params.push(currency); }
     if (active !== undefined) { sets.push(`active=$${idx++}`); params.push(active); }
 
-    params.push(id, client_id);
+    params.push(id);
     const { rows } = await pool.query(
-      `UPDATE clinic_services SET ${sets.join(",")} WHERE id=$${idx++} AND client_id=$${idx} RETURNING *`,
+      `UPDATE clinic_services SET ${sets.join(",")} WHERE id=$${idx++} RETURNING *`,
       params
     );
     if (rows.length === 0) return res.status(404).json({ error: "Not found" });
@@ -96,12 +94,12 @@ router.put("/services/:id", async (req, res) => {
  */
 router.delete("/services/:id", async (req, res) => {
   try {
-    const { role, client_id } = req.user;
-    if (!["admin", "super_admin"].includes(role))
+    const { role } = req.user;
+    if (role !== "admin")
       return res.status(403).json({ error: "Forbidden" });
 
     const id = parseInt(req.params.id);
-    await pool.query(`DELETE FROM clinic_services WHERE id=$1 AND client_id=$2`, [id, client_id]);
+    await pool.query(`DELETE FROM clinic_services WHERE id=$1`, [id]);
     res.json({ success: true });
   } catch (err) {
     console.error("DELETE /catalog/services error:", err);
@@ -116,8 +114,8 @@ router.delete("/services/:id", async (req, res) => {
  */
 router.post("/services/import", async (req, res) => {
   try {
-    const { role, client_id } = req.user;
-    if (!["admin", "super_admin"].includes(role))
+    const { role } = req.user;
+    if (role !== "admin")
       return res.status(403).json({ error: "Forbidden" });
 
     const { rows: importRows } = req.body;
@@ -131,9 +129,8 @@ router.post("/services/import", async (req, res) => {
 
     for (let i = 0; i < importRows.length; i++) {
       const row = importRows[i];
-      const rowNum = i + 2; // +2 because row 1 is header, data starts at 2
+      const rowNum = i + 2;
 
-      // Validate
       if (!row.serviceName || String(row.serviceName).trim() === "") {
         errors.push({ row: rowNum, message: "Missing serviceName" });
         failed++;
@@ -146,10 +143,9 @@ router.post("/services/import", async (req, res) => {
       }
 
       try {
-        // Check if exists
         const existing = await pool.query(
-          `SELECT id FROM clinic_services WHERE client_id=$1 AND service_name=$2`,
-          [client_id, String(row.serviceName).trim()]
+          `SELECT id FROM clinic_services WHERE service_name=$1`,
+          [String(row.serviceName).trim()]
         );
 
         const active = row.active === false || String(row.active).toUpperCase() === "FALSE" ? false : true;
@@ -157,15 +153,15 @@ router.post("/services/import", async (req, res) => {
         if (existing.rows.length > 0) {
           await pool.query(
             `UPDATE clinic_services SET category=$1, price=$2, currency=$3, active=$4, updated_at=NOW()
-             WHERE client_id=$5 AND service_name=$6`,
-            [row.category || "General", Number(row.price), row.currency || "JOD", active, client_id, String(row.serviceName).trim()]
+             WHERE service_name=$5`,
+            [row.category || "General", Number(row.price), row.currency || "JOD", active, String(row.serviceName).trim()]
           );
           updated++;
         } else {
           await pool.query(
-            `INSERT INTO clinic_services (client_id, service_name, category, price, currency, active)
-             VALUES ($1,$2,$3,$4,$5,$6)`,
-            [client_id, String(row.serviceName).trim(), row.category || "General", Number(row.price), row.currency || "JOD", active]
+            `INSERT INTO clinic_services (service_name, category, price, currency, active)
+             VALUES ($1,$2,$3,$4,$5)`,
+            [String(row.serviceName).trim(), row.category || "General", Number(row.price), row.currency || "JOD", active]
           );
           created++;
         }
@@ -187,14 +183,12 @@ router.post("/services/import", async (req, res) => {
 
 /**
  * GET /catalog/medications
- * List all medications for the current client
+ * List all medications
  */
 router.get("/medications", async (req, res) => {
   try {
-    const { client_id } = req.user;
     const { rows } = await pool.query(
-      `SELECT * FROM clinic_medications WHERE client_id=$1 ORDER BY COALESCE(brand_name, generic_name)`,
-      [client_id]
+      `SELECT * FROM clinic_medications ORDER BY COALESCE(brand_name, generic_name)`
     );
     res.json(rows.map(mapMedication));
   } catch (err) {
@@ -209,8 +203,8 @@ router.get("/medications", async (req, res) => {
  */
 router.post("/medications", async (req, res) => {
   try {
-    const { role, client_id } = req.user;
-    if (!["admin", "super_admin"].includes(role))
+    const { role } = req.user;
+    if (role !== "admin")
       return res.status(403).json({ error: "Forbidden" });
 
     const { brandName, genericName, strength, dosageForm, route, defaultDose, defaultFrequency, defaultDuration, notes, active } = req.body;
@@ -218,10 +212,10 @@ router.post("/medications", async (req, res) => {
       return res.status(400).json({ error: "At least brandName or genericName required" });
 
     const { rows } = await pool.query(
-      `INSERT INTO clinic_medications (client_id, brand_name, generic_name, strength, dosage_form, route, default_dose, default_frequency, default_duration, notes, active)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+      `INSERT INTO clinic_medications (brand_name, generic_name, strength, dosage_form, route, default_dose, default_frequency, default_duration, notes, active)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
        RETURNING *`,
-      [client_id, brandName || null, genericName || null, strength || null, dosageForm || null,
+      [brandName || null, genericName || null, strength || null, dosageForm || null,
        route || null, defaultDose || null, defaultFrequency || null, defaultDuration || null, notes || null, active !== false]
     );
     res.status(201).json(mapMedication(rows[0]));
@@ -239,8 +233,8 @@ router.post("/medications", async (req, res) => {
  */
 router.put("/medications/:id", async (req, res) => {
   try {
-    const { role, client_id } = req.user;
-    if (!["admin", "super_admin"].includes(role))
+    const { role } = req.user;
+    if (role !== "admin")
       return res.status(403).json({ error: "Forbidden" });
 
     const id = parseInt(req.params.id);
@@ -261,9 +255,9 @@ router.put("/medications/:id", async (req, res) => {
     if (notes !== undefined) { sets.push(`notes=$${idx++}`); params.push(notes || null); }
     if (active !== undefined) { sets.push(`active=$${idx++}`); params.push(active); }
 
-    params.push(id, client_id);
+    params.push(id);
     const { rows } = await pool.query(
-      `UPDATE clinic_medications SET ${sets.join(",")} WHERE id=$${idx++} AND client_id=$${idx} RETURNING *`,
+      `UPDATE clinic_medications SET ${sets.join(",")} WHERE id=$${idx++} RETURNING *`,
       params
     );
     if (rows.length === 0) return res.status(404).json({ error: "Not found" });
@@ -279,12 +273,12 @@ router.put("/medications/:id", async (req, res) => {
  */
 router.delete("/medications/:id", async (req, res) => {
   try {
-    const { role, client_id } = req.user;
-    if (!["admin", "super_admin"].includes(role))
+    const { role } = req.user;
+    if (role !== "admin")
       return res.status(403).json({ error: "Forbidden" });
 
     const id = parseInt(req.params.id);
-    await pool.query(`DELETE FROM clinic_medications WHERE id=$1 AND client_id=$2`, [id, client_id]);
+    await pool.query(`DELETE FROM clinic_medications WHERE id=$1`, [id]);
     res.json({ success: true });
   } catch (err) {
     console.error("DELETE /catalog/medications error:", err);
@@ -295,12 +289,11 @@ router.delete("/medications/:id", async (req, res) => {
 /**
  * POST /catalog/medications/import
  * Upload Excel, validate, upsert medications
- * Expects JSON body: { rows: [ {brandName, genericName, strength, ...}, ... ] }
  */
 router.post("/medications/import", async (req, res) => {
   try {
-    const { role, client_id } = req.user;
-    if (!["admin", "super_admin"].includes(role))
+    const { role } = req.user;
+    if (role !== "admin")
       return res.status(403).json({ error: "Forbidden" });
 
     const { rows: importRows } = req.body;
@@ -330,19 +323,18 @@ router.post("/medications/import", async (req, res) => {
       const active = row.active === false || String(row.active).toUpperCase() === "FALSE" ? false : true;
 
       try {
-        // Try to find existing by brand or generic key
         let existing = null;
         if (brandName) {
           const r = await pool.query(
-            `SELECT id FROM clinic_medications WHERE client_id=$1 AND brand_name=$2 AND COALESCE(strength,'')=$3 AND COALESCE(dosage_form,'')=$4`,
-            [client_id, brandName, strength || '', dosageForm || '']
+            `SELECT id FROM clinic_medications WHERE brand_name=$1 AND COALESCE(strength,'')=$2 AND COALESCE(dosage_form,'')=$3`,
+            [brandName, strength || '', dosageForm || '']
           );
           if (r.rows.length > 0) existing = r.rows[0];
         }
         if (!existing && genericName) {
           const r = await pool.query(
-            `SELECT id FROM clinic_medications WHERE client_id=$1 AND generic_name=$2 AND COALESCE(strength,'')=$3 AND COALESCE(dosage_form,'')=$4`,
-            [client_id, genericName, strength || '', dosageForm || '']
+            `SELECT id FROM clinic_medications WHERE generic_name=$1 AND COALESCE(strength,'')=$2 AND COALESCE(dosage_form,'')=$3`,
+            [genericName, strength || '', dosageForm || '']
           );
           if (r.rows.length > 0) existing = r.rows[0];
         }
@@ -351,21 +343,21 @@ router.post("/medications/import", async (req, res) => {
           await pool.query(
             `UPDATE clinic_medications SET brand_name=$1, generic_name=$2, strength=$3, dosage_form=$4,
              route=$5, default_dose=$6, default_frequency=$7, default_duration=$8, notes=$9, active=$10, updated_at=NOW()
-             WHERE id=$11 AND client_id=$12`,
+             WHERE id=$11`,
             [
               brandName, genericName, strength, dosageForm,
               row.route || null, row.defaultDose || null, row.defaultFrequency || null,
               row.defaultDuration || null, row.notes || null, active,
-              existing.id, client_id
+              existing.id
             ]
           );
           updated++;
         } else {
           await pool.query(
-            `INSERT INTO clinic_medications (client_id, brand_name, generic_name, strength, dosage_form, route, default_dose, default_frequency, default_duration, notes, active)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+            `INSERT INTO clinic_medications (brand_name, generic_name, strength, dosage_form, route, default_dose, default_frequency, default_duration, notes, active)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
             [
-              client_id, brandName, genericName, strength, dosageForm,
+              brandName, genericName, strength, dosageForm,
               row.route || null, row.defaultDose || null, row.defaultFrequency || null,
               row.defaultDuration || null, row.notes || null, active
             ]
@@ -396,7 +388,6 @@ function mapService(row) {
     price: parseFloat(row.price),
     currency: row.currency || "JOD",
     active: row.active !== false,
-    clientId: row.client_id,
     createdAt: row.created_at ? Number(row.created_at) : Date.now(),
     updatedAt: row.updated_at ? Number(row.updated_at) : Date.now(),
   };
@@ -415,7 +406,6 @@ function mapMedication(row) {
     defaultDuration: row.default_duration || "",
     notes: row.notes || "",
     active: row.active !== false,
-    clientId: row.client_id,
     createdAt: row.created_at ? Number(row.created_at) : Date.now(),
     updatedAt: row.updated_at ? Number(row.updated_at) : Date.now(),
   };

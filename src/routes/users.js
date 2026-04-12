@@ -7,33 +7,21 @@ import { auth } from "../middleware/auth.js";
 const router = express.Router();
 router.use(auth);
 
-function makeDoctorUsername(name) {
-  return "dr_" + name.toLowerCase().replace(/\s+/g, "");
-}
-
 function makePassword() {
   return crypto.randomBytes(6).toString("base64url");
 }
 
 /**
  * GET /users
- * List all users for the current client
- * All authenticated users can read (needed for doctor lists in appointments, etc.)
+ * List all users
  */
 router.get("/", async (req, res) => {
   try {
-    const { role, client_id } = req.user;
-
-    const query = client_id
-      ? `SELECT uid, name, email, role, clinic_ids, client_id, is_active, is_archived,
-                created_at, created_by, updated_at, updated_by
-         FROM users WHERE client_id=$1 ORDER BY uid`
-      : `SELECT uid, name, email, role, clinic_ids, client_id, is_active, is_archived,
-                created_at, created_by, updated_at, updated_by
-         FROM users ORDER BY uid`;
-
-    const params = client_id ? [client_id] : [];
-    const { rows } = await pool.query(query, params);
+    const { rows } = await pool.query(
+      `SELECT uid, name, email, role, clinic_ids, is_active, is_archived,
+              created_at, created_by, updated_at, updated_by
+       FROM users ORDER BY uid`
+    );
 
     const users = rows.map((row) => {
       let clinicIds = Array.isArray(row.clinic_ids) ? row.clinic_ids : [];
@@ -43,15 +31,10 @@ router.get("/", async (req, res) => {
         name: row.name,
         role: row.role,
         clinicIds,
-        clientId: row.client_id,
         isActive: row.is_active !== false,
-        createdAt: row.created_at
-          ? Number(row.created_at)
-          : Date.now(),
+        createdAt: row.created_at ? Number(row.created_at) : Date.now(),
         createdBy: row.created_by || "system",
-        updatedAt: row.updated_at
-          ? Number(row.updated_at)
-          : Date.now(),
+        updatedAt: row.updated_at ? Number(row.updated_at) : Date.now(),
         updatedBy: row.updated_by || "system",
         isArchived: row.is_archived || false,
       };
@@ -71,13 +54,12 @@ router.get("/", async (req, res) => {
  */
 router.post("/", async (req, res) => {
   try {
-    const { role: callerRole, client_id } = req.user;
-    if (!["admin", "super_admin"].includes(callerRole)) {
+    const { role: callerRole } = req.user;
+    if (callerRole !== "admin") {
       return res.status(403).json({ error: "Forbidden" });
     }
 
-    const { name, full_name, email, password, role, clinic_ids, is_active } =
-      req.body;
+    const { name, full_name, email, password, role, clinic_ids, is_active } = req.body;
 
     const userName = name || full_name;
     if (!userName || !role) {
@@ -91,22 +73,11 @@ router.post("/", async (req, res) => {
     const now = Date.now();
 
     const { rows } = await pool.query(
-      `INSERT INTO users (uid, name, email, password, role, clinic_ids, client_id,
+      `INSERT INTO users (uid, name, email, password, role, clinic_ids,
                           created_at, updated_at, created_by, updated_by, is_active, is_archived)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'system', 'system', $10, false)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'system', 'system', $9, false)
        RETURNING uid, name, email, role`,
-      [
-        uid,
-        userName,
-        email || null,
-        hashedPassword,
-        role,
-        clinicIdsArr,
-        client_id,
-        now,
-        now,
-        is_active !== false,
-      ]
+      [uid, userName, email || null, hashedPassword, role, clinicIdsArr, now, now, is_active !== false]
     );
 
     res.status(201).json({
@@ -128,8 +99,8 @@ router.post("/", async (req, res) => {
  */
 router.post("/doctors", async (req, res) => {
   try {
-    const { role: callerRole, client_id } = req.user;
-    if (!["admin", "super_admin"].includes(callerRole)) {
+    const { role: callerRole } = req.user;
+    if (callerRole !== "admin") {
       return res.status(403).json({ error: "Forbidden" });
     }
 
@@ -145,11 +116,11 @@ router.post("/doctors", async (req, res) => {
     const now = Date.now();
 
     const { rows } = await pool.query(
-      `INSERT INTO users (uid, name, email, role, password, client_id,
+      `INSERT INTO users (uid, name, email, role, password,
                           created_at, updated_at, created_by, updated_by, is_active, is_archived, clinic_ids)
-       VALUES ($1, $2, $3, 'doctor', $4, $5, $6, $7, 'system', 'system', true, false, $8)
+       VALUES ($1, $2, $3, 'doctor', $4, $5, $6, 'system', 'system', true, false, $7)
        RETURNING uid, name, email`,
-      [uid, doctorName, email || null, hashedPassword, client_id, now, now, []]
+      [uid, doctorName, email || null, hashedPassword, now, now, []]
     );
     return res.status(201).json({
       doctor: rows[0],
@@ -168,16 +139,14 @@ router.post("/doctors", async (req, res) => {
  */
 router.put("/:id", async (req, res) => {
   try {
-    const { role: callerRole, client_id } = req.user;
-    if (!["admin", "super_admin"].includes(callerRole)) {
+    const { role: callerRole } = req.user;
+    if (callerRole !== "admin") {
       return res.status(403).json({ error: "Forbidden" });
     }
 
     const userId = req.params.id;
-    const { name, full_name, email, password, role, clinic_ids, is_active } =
-      req.body;
+    const { name, full_name, email, password, role, clinic_ids, is_active } = req.body;
 
-    // Build SET clauses dynamically
     const now = Date.now();
     const sets = [`updated_at=${now}`];
     const params = [];
@@ -210,15 +179,8 @@ router.put("/:id", async (req, res) => {
       params.push(is_active);
     }
 
-    // Add WHERE clause params
     params.push(userId);
-    const whereId = `uid=$${idx++}`;
-
-    let whereClause = whereId;
-    if (client_id) {
-      params.push(client_id);
-      whereClause += ` AND client_id=$${idx++}`;
-    }
+    const whereClause = `uid=$${idx++}`;
 
     await pool.query(
       `UPDATE users SET ${sets.join(", ")} WHERE ${whereClause}`,
@@ -239,18 +201,13 @@ router.put("/:id", async (req, res) => {
  */
 router.delete("/:id", async (req, res) => {
   try {
-    const { role: callerRole, client_id } = req.user;
-    if (!["admin", "super_admin"].includes(callerRole)) {
+    const { role: callerRole } = req.user;
+    if (callerRole !== "admin") {
       return res.status(403).json({ error: "Forbidden" });
     }
 
     const userId = req.params.id;
-    const query = client_id
-      ? "DELETE FROM users WHERE uid=$1 AND client_id=$2"
-      : "DELETE FROM users WHERE uid=$1";
-    const params = client_id ? [userId, client_id] : [userId];
-
-    await pool.query(query, params);
+    await pool.query("DELETE FROM users WHERE uid=$1", [userId]);
     res.json({ success: true });
   } catch (err) {
     console.error("DELETE /users/:id error:", err);

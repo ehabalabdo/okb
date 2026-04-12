@@ -1,14 +1,14 @@
-import express from "express";
+﻿import express from "express";
 import pool from "../db.js";
 import { auth } from "../middleware/auth.js";
 
 const router = express.Router();
 router.use(auth);
 
-// Only staff can access invoices (not patients or HR employees)
+// Only staff can access invoices
 function requireStaffRole(req, res, next) {
-  const allowedRoles = ["admin", "doctor", "secretary", "super_admin", "accountant", "senior_accountant"];
-  if (!allowedRoles.includes(req.user.role) && req.user.type !== "super_admin") {
+  const allowedRoles = ["admin", "doctor", "secretary", "accountant", "senior_accountant"];
+  if (!allowedRoles.includes(req.user.role)) {
     return res.status(403).json({ error: "Access denied" });
   }
   next();
@@ -38,26 +38,18 @@ function mapInvoiceRow(row) {
 
 /**
  * GET /invoices
- * List all invoices for the current client
+ * List all invoices
  * For senior_accountant: apply overlays from invoice_overrides
  */
 router.get("/", async (req, res) => {
   try {
-    const { client_id, role } = req.user;
-    const query = client_id
-      ? "SELECT * FROM invoices WHERE client_id=$1 ORDER BY created_at DESC"
-      : "SELECT * FROM invoices ORDER BY created_at DESC";
-    const params = client_id ? [client_id] : [];
-    const { rows } = await pool.query(query, params);
+    const { role } = req.user;
+    const { rows } = await pool.query("SELECT * FROM invoices ORDER BY created_at DESC");
     let invoices = rows.map(mapInvoiceRow);
 
     // For senior_accountant: apply overlay (edited/deleted invoices)
     if (role === "senior_accountant") {
-      const overridesQuery = client_id
-        ? "SELECT * FROM invoice_overrides WHERE client_id=$1"
-        : "SELECT * FROM invoice_overrides";
-      const overridesParams = client_id ? [client_id] : [];
-      const { rows: overrides } = await pool.query(overridesQuery, overridesParams);
+      const { rows: overrides } = await pool.query("SELECT * FROM invoice_overrides");
       const overrideMap = {};
       for (const ov of overrides) {
         overrideMap[ov.invoice_id] = ov;
@@ -87,8 +79,8 @@ router.get("/", async (req, res) => {
  */
 router.post("/", async (req, res) => {
   try {
-    const { role, client_id } = req.user;
-    if (!["admin", "receptionist", "secretary", "doctor", "super_admin"].includes(role)) {
+    const { role } = req.user;
+    if (!["admin", "receptionist", "secretary", "doctor"].includes(role)) {
       return res.status(403).json({ error: "Forbidden" });
     }
 
@@ -119,13 +111,13 @@ router.post("/", async (req, res) => {
       `INSERT INTO invoices (
         id, visit_id, patient_id, patient_name, items,
         total_amount, paid_amount, payment_method, status,
-        client_id, created_at, updated_at, created_by, updated_by
+        created_at, updated_at, created_by, updated_by
       )
-      VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+      VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, $13)
       RETURNING *`,
       [
         invoiceId, vId, pId, pName, JSON.stringify(parsedItems),
-        total, paid, method, status || "unpaid", client_id,
+        total, paid, method, status || "unpaid",
         now, now, userId, userId,
       ]
     );
@@ -145,7 +137,7 @@ router.post("/", async (req, res) => {
  */
 router.put("/:id", async (req, res) => {
   try {
-    const { client_id, role } = req.user;
+    const { role } = req.user;
     const invoiceId = req.params.id;
 
     // Accountant is read-only
@@ -169,14 +161,13 @@ router.put("/:id", async (req, res) => {
       if (method !== undefined) overrideData.paymentMethod = method;
       if (status !== undefined) overrideData.status = status;
 
-      const cid = client_id || 0;
       const userId = req.user.id || req.user.username || "system";
       await pool.query(
-        `INSERT INTO invoice_overrides (invoice_id, client_id, override_data, modified_by, updated_at)
-         VALUES ($1, $2, $3::jsonb, $4, NOW())
-         ON CONFLICT (invoice_id, client_id)
-         DO UPDATE SET override_data = $3::jsonb, modified_by = $4, updated_at = NOW()`,
-        [invoiceId, cid, JSON.stringify(overrideData), userId]
+        `INSERT INTO invoice_overrides (invoice_id, override_data, modified_by, updated_at)
+         VALUES ($1, $2::jsonb, $3, NOW())
+         ON CONFLICT (invoice_id)
+         DO UPDATE SET override_data = $2::jsonb, modified_by = $3, updated_at = NOW()`,
+        [invoiceId, JSON.stringify(overrideData), userId]
       );
       return res.json({ success: true });
     }
@@ -200,12 +191,10 @@ router.put("/:id", async (req, res) => {
     if (items !== undefined) {
       sets.push(`items=$${idx++}::jsonb`);
       params.push(JSON.stringify(items));
-      // Auto-recalculate total from items
       const recalcTotal = items.reduce((s, i) => s + (parseFloat(i.price) || 0), 0);
       sets.push(`total_amount=$${idx++}`);
       params.push(recalcTotal);
 
-      // If paid > new total, cap paid_amount and fix status
       const { rows: currentRows } = await pool.query(
         `SELECT paid_amount FROM invoices WHERE id=$1`, [invoiceId]
       );
@@ -253,11 +242,7 @@ router.put("/:id", async (req, res) => {
     }
 
     params.push(invoiceId);
-    let whereClause = `id=$${idx++}`;
-    if (client_id) {
-      params.push(client_id);
-      whereClause += ` AND client_id=$${idx++}`;
-    }
+    const whereClause = `id=$${idx++}`;
 
     await pool.query(
       `UPDATE invoices SET ${sets.join(", ")} WHERE ${whereClause}`,
@@ -279,45 +264,42 @@ router.put("/:id", async (req, res) => {
  */
 router.delete("/:id", async (req, res) => {
   try {
-    const { role, client_id } = req.user;
+    const { role } = req.user;
 
-    // Accountant is read-only
     if (role === "accountant") {
       return res.status(403).json({ error: "Read-only access" });
     }
 
-    // Senior accountant: overlay delete (mark as deleted, don't touch real data)
+    // Senior accountant: overlay delete
     if (role === "senior_accountant") {
       const invoiceId = req.params.id;
-      const cid = client_id || 0;
       const userId = req.user.id || req.user.username || "system";
       await pool.query(
-        `INSERT INTO invoice_overrides (invoice_id, client_id, is_deleted, modified_by, updated_at)
-         VALUES ($1, $2, true, $3, NOW())
-         ON CONFLICT (invoice_id, client_id)
-         DO UPDATE SET is_deleted = true, modified_by = $3, updated_at = NOW()`,
-        [invoiceId, cid, userId]
+        `INSERT INTO invoice_overrides (invoice_id, is_deleted, modified_by, updated_at)
+         VALUES ($1, true, $2, NOW())
+         ON CONFLICT (invoice_id)
+         DO UPDATE SET is_deleted = true, modified_by = $2, updated_at = NOW()`,
+        [invoiceId, userId]
       );
       return res.json({ success: true });
     }
 
-    if (!["admin", "super_admin"].includes(role)) {
+    if (role !== "admin") {
       return res.status(403).json({ error: "Forbidden" });
     }
 
     const invoiceId = req.params.id;
 
-    // 1. Get the invoice to find visit_id and patient_id
-    const invQuery = client_id
-      ? "SELECT visit_id, patient_id FROM invoices WHERE id=$1 AND client_id=$2"
-      : "SELECT visit_id, patient_id FROM invoices WHERE id=$1";
-    const invParams = client_id ? [invoiceId, client_id] : [invoiceId];
-    const { rows: invRows } = await pool.query(invQuery, invParams);
+    // Get the invoice to find visit_id and patient_id
+    const { rows: invRows } = await pool.query(
+      "SELECT visit_id, patient_id FROM invoices WHERE id=$1",
+      [invoiceId]
+    );
 
     if (invRows.length > 0 && invRows[0].visit_id && invRows[0].patient_id) {
       const { visit_id, patient_id } = invRows[0];
 
-      // 2. Remove the visit from patient's history array
+      // Remove the visit from patient's history array
       const { rows: patRows } = await pool.query(
         "SELECT history FROM patients WHERE id=$1", [patient_id]
       );
@@ -338,13 +320,8 @@ router.delete("/:id", async (req, res) => {
       }
     }
 
-    // 3. Delete the invoice
-    const delQuery = client_id
-      ? "DELETE FROM invoices WHERE id=$1 AND client_id=$2"
-      : "DELETE FROM invoices WHERE id=$1";
-    const delParams = client_id ? [invoiceId, client_id] : [invoiceId];
-    await pool.query(delQuery, delParams);
-
+    // Delete the invoice
+    await pool.query("DELETE FROM invoices WHERE id=$1", [invoiceId]);
     res.json({ success: true });
   } catch (err) {
     console.error("DELETE /invoices/:id error:", err);

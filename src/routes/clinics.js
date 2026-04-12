@@ -1,4 +1,4 @@
-import express from "express";
+﻿import express from "express";
 import pool from "../db.js";
 import { auth } from "../middleware/auth.js";
 
@@ -7,16 +7,11 @@ router.use(auth);
 
 /**
  * GET /clinics
- * List all clinics for the current client
+ * List all clinics
  */
 router.get("/", async (req, res) => {
   try {
-    const { client_id } = req.user;
-    const query = client_id
-      ? `SELECT * FROM clinics WHERE client_id=$1 ORDER BY id`
-      : `SELECT * FROM clinics ORDER BY id`;
-    const params = client_id ? [client_id] : [];
-    const { rows } = await pool.query(query, params);
+    const { rows } = await pool.query(`SELECT * FROM clinics ORDER BY id`);
 
     const clinics = rows.map((row) => ({
       id: String(row.id),
@@ -24,14 +19,9 @@ router.get("/", async (req, res) => {
       type: row.type || "General",
       category: row.category || "clinic",
       active: row.active !== false,
-      clientId: row.client_id,
-      createdAt: row.created_at
-        ? Number(row.created_at)
-        : Date.now(),
+      createdAt: row.created_at ? Number(row.created_at) : Date.now(),
       createdBy: row.created_by || "system",
-      updatedAt: row.updated_at
-        ? Number(row.updated_at)
-        : Date.now(),
+      updatedAt: row.updated_at ? Number(row.updated_at) : Date.now(),
       updatedBy: row.updated_by || "system",
       isArchived: row.is_archived || false,
     }));
@@ -45,13 +35,12 @@ router.get("/", async (req, res) => {
 
 /**
  * POST /clinics
- * Create a new clinic/department
- * Admin only
+ * Create a new clinic/department (Admin only)
  */
 router.post("/", async (req, res) => {
   try {
-    const { role, client_id } = req.user;
-    if (!["admin", "super_admin"].includes(role)) {
+    const { role } = req.user;
+    if (role !== "admin") {
       return res.status(403).json({ error: "Forbidden" });
     }
 
@@ -62,10 +51,10 @@ router.post("/", async (req, res) => {
 
     const now = Date.now();
     const { rows } = await pool.query(
-      `INSERT INTO clinics (id, name, type, category, active, client_id, created_at, updated_at, created_by, updated_by, is_archived)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'system', 'system', false)
+      `INSERT INTO clinics (id, name, type, category, active, created_at, updated_at, created_by, updated_by, is_archived)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'system', 'system', false)
        RETURNING *`,
-      [name.toLowerCase().replace(/\s+/g, '_') + '_' + Date.now(), name, type || "General", category || "clinic", active !== false, client_id, now, now]
+      [name.toLowerCase().replace(/\s+/g, '_') + '_' + Date.now(), name, type || "General", category || "clinic", active !== false, now, now]
     );
 
     res.status(201).json({
@@ -74,7 +63,6 @@ router.post("/", async (req, res) => {
       type: rows[0].type,
       category: rows[0].category,
       active: rows[0].active,
-      clientId: rows[0].client_id,
     });
   } catch (err) {
     console.error("POST /clinics error:", err);
@@ -84,46 +72,28 @@ router.post("/", async (req, res) => {
 
 /**
  * PUT /clinics/:id
- * Update clinic fields
- * Admin only
+ * Update clinic fields (Admin only)
  */
 router.put("/:id", async (req, res) => {
   try {
-    const { role, client_id } = req.user;
-    if (!["admin", "super_admin"].includes(role)) {
+    const { role } = req.user;
+    if (role !== "admin") {
       return res.status(403).json({ error: "Forbidden" });
     }
 
-    const clinicId = parseInt(req.params.id);
     const { name, type, category, active } = req.body;
 
     const sets = [`updated_at=${Date.now()}`];
     const params = [];
     let idx = 1;
 
-    if (name !== undefined) {
-      sets.push(`name=$${idx++}`);
-      params.push(name);
-    }
-    if (type !== undefined) {
-      sets.push(`type=$${idx++}`);
-      params.push(type);
-    }
-    if (category !== undefined) {
-      sets.push(`category=$${idx++}`);
-      params.push(category);
-    }
-    if (active !== undefined) {
-      sets.push(`active=$${idx++}`);
-      params.push(active);
-    }
+    if (name !== undefined) { sets.push(`name=$${idx++}`); params.push(name); }
+    if (type !== undefined) { sets.push(`type=$${idx++}`); params.push(type); }
+    if (category !== undefined) { sets.push(`category=$${idx++}`); params.push(category); }
+    if (active !== undefined) { sets.push(`active=$${idx++}`); params.push(active); }
 
     params.push(req.params.id);
-    let whereClause = `id=$${idx++}`;
-    if (client_id) {
-      params.push(client_id);
-      whereClause += ` AND client_id=$${idx++}`;
-    }
+    const whereClause = `id=$${idx++}`;
 
     await pool.query(
       `UPDATE clinics SET ${sets.join(", ")} WHERE ${whereClause}`,
@@ -139,27 +109,20 @@ router.put("/:id", async (req, res) => {
 
 /**
  * PUT /clinics/:id/status
- * Toggle clinic active status
- * Admin only
+ * Toggle clinic active status (Admin only)
  */
 router.put("/:id/status", async (req, res) => {
   try {
-    const { role, client_id } = req.user;
-    if (!["admin", "super_admin"].includes(role)) {
+    const { role } = req.user;
+    if (role !== "admin") {
       return res.status(403).json({ error: "Forbidden" });
     }
 
-    const clinicId = req.params.id;
     const { active } = req.body;
-
-    const query = client_id
-      ? `UPDATE clinics SET active=$1, updated_at=${Date.now()} WHERE id=$2 AND client_id=$3`
-      : `UPDATE clinics SET active=$1, updated_at=${Date.now()} WHERE id=$2`;
-    const params = client_id
-      ? [active, clinicId, client_id]
-      : [active, clinicId];
-
-    await pool.query(query, params);
+    await pool.query(
+      `UPDATE clinics SET active=$1, updated_at=${Date.now()} WHERE id=$2`,
+      [active, req.params.id]
+    );
     res.json({ success: true });
   } catch (err) {
     console.error("PUT /clinics/:id/status error:", err);
@@ -169,23 +132,16 @@ router.put("/:id/status", async (req, res) => {
 
 /**
  * DELETE /clinics/:id
- * Delete a clinic
- * Admin only
+ * Delete a clinic (Admin only)
  */
 router.delete("/:id", async (req, res) => {
   try {
-    const { role, client_id } = req.user;
-    if (!["admin", "super_admin"].includes(role)) {
+    const { role } = req.user;
+    if (role !== "admin") {
       return res.status(403).json({ error: "Forbidden" });
     }
 
-    const clinicId = req.params.id;
-    const query = client_id
-      ? "DELETE FROM clinics WHERE id=$1 AND client_id=$2"
-      : "DELETE FROM clinics WHERE id=$1";
-    const params = client_id ? [clinicId, client_id] : [clinicId];
-
-    await pool.query(query, params);
+    await pool.query("DELETE FROM clinics WHERE id=$1", [req.params.id]);
     res.json({ success: true });
   } catch (err) {
     console.error("DELETE /clinics/:id error:", err);

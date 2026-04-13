@@ -1,28 +1,26 @@
-﻿import express from "express";
-import pool from "../db.js";
-import { auth } from "../middleware/auth.js";
+﻿import { Hono } from "hono";
+import { authMiddleware } from "../middleware/auth.js";
 
-const router = express.Router();
-router.use(auth);
+const app = new Hono();
+app.use("*", authMiddleware);
 
 // Only staff can access invoices
-function requireStaffRole(req, res, next) {
-  const allowedRoles = ["admin", "doctor", "secretary", "accountant", "senior_accountant"];
-  if (!allowedRoles.includes(req.user.role)) {
-    return res.status(403).json({ error: "Access denied" });
-  }
-  next();
-}
-router.use(requireStaffRole);
+app.use("*", async (c, next) => {
+  const user = c.get("user");
+  const allowed = ["admin", "doctor", "secretary", "accountant", "senior_accountant"];
+  if (!allowed.includes(user.role)) return c.json({ error: "Access denied" }, 403);
+  return next();
+});
 
-/** Map a DB row to frontend-compatible Invoice shape */
 function mapInvoiceRow(row) {
+  let items = [];
+  try { items = typeof row.items === "string" ? JSON.parse(row.items) : (row.items || []); } catch { items = []; }
   return {
     id: row.id,
     visitId: row.visit_id,
     patientId: row.patient_id,
     patientName: row.patient_name,
-    items: (() => { try { return typeof row.items === "string" ? JSON.parse(row.items) : (row.items || []); } catch { return []; } })(),
+    items,
     totalAmount: parseFloat(row.total_amount),
     paidAmount: parseFloat(row.paid_amount),
     paymentMethod: row.payment_method,
@@ -36,27 +34,21 @@ function mapInvoiceRow(row) {
   };
 }
 
-/**
- * GET /invoices
- * List all invoices
- * For senior_accountant: apply overlays from invoice_overrides
- */
-router.get("/", async (req, res) => {
+app.get("/", async (c) => {
   try {
-    const { role } = req.user;
-    const { rows } = await pool.query("SELECT * FROM invoices ORDER BY created_at DESC");
-    let invoices = rows.map(mapInvoiceRow);
+    const user = c.get("user");
+    const db = c.env.DB;
+    const { results } = await db.prepare("SELECT * FROM invoices ORDER BY created_at DESC").all();
+    let invoices = results.map(mapInvoiceRow);
 
-    // For senior_accountant: apply overlay (edited/deleted invoices)
-    if (role === "senior_accountant") {
-      const { rows: overrides } = await pool.query("SELECT * FROM invoice_overrides");
+    if (user.role === "senior_accountant") {
+      const { results: overrides } = await db.prepare("SELECT * FROM invoice_overrides").all();
       const overrideMap = {};
-      for (const ov of overrides) {
-        overrideMap[ov.invoice_id] = ov;
-      }
+      for (const ov of overrides) overrideMap[ov.invoice_id] = ov;
+
       invoices = invoices
-        .filter(inv => !overrideMap[inv.id]?.is_deleted)
-        .map(inv => {
+        .filter((inv) => !overrideMap[inv.id]?.is_deleted)
+        .map((inv) => {
           const ov = overrideMap[inv.id];
           if (ov && ov.override_data) {
             const data = typeof ov.override_data === "string" ? JSON.parse(ov.override_data) : ov.override_data;
@@ -66,267 +58,162 @@ router.get("/", async (req, res) => {
         });
     }
 
-    res.json(invoices);
+    return c.json(invoices);
   } catch (err) {
     console.error("GET /invoices error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-/**
- * POST /invoices
- * Create a new invoice
- */
-router.post("/", async (req, res) => {
+app.post("/", async (c) => {
   try {
-    const { role } = req.user;
-    if (!["admin", "receptionist", "secretary", "doctor"].includes(role)) {
-      return res.status(403).json({ error: "Forbidden" });
+    const user = c.get("user");
+    if (!["admin", "receptionist", "secretary", "doctor"].includes(user.role)) {
+      return c.json({ error: "Forbidden" }, 403);
     }
 
-    const {
-      id, visitId, visit_id,
-      patientId, patient_id,
-      patientName, patient_name,
-      items, totalAmount, total_amount,
-      paidAmount, paid_amount,
-      paymentMethod, payment_method,
-      status,
-    } = req.body;
+    const body = await c.req.json();
+    const db = c.env.DB;
 
-    const invoiceId = id || `inv_${Date.now()}`;
-    const vId = visitId || visit_id;
-    const pId = patientId || patient_id;
-    const pName = patientName || patient_name || "";
-    const parsedItems = items || [];
+    const invoiceId = body.id || `inv_${Date.now()}`;
+    const vId = body.visitId || body.visit_id;
+    const pId = body.patientId || body.patient_id;
+    const pName = body.patientName || body.patient_name || "";
+    const parsedItems = body.items || [];
     const calculatedTotal = parsedItems.reduce((s, i) => s + (parseFloat(i.price) || 0), 0);
-    const total = calculatedTotal || totalAmount || total_amount || 0;
-    const paid = paidAmount || paid_amount || 0;
-    const method = paymentMethod || payment_method || "cash";
-
+    const total = calculatedTotal || body.totalAmount || body.total_amount || 0;
+    const paid = body.paidAmount || body.paid_amount || 0;
+    const method = body.paymentMethod || body.payment_method || "cash";
     const now = Date.now();
-    const userId = req.user.id || req.user.username || 'system';
+    const userId = user.id || user.username || "system";
 
-    const { rows } = await pool.query(
-      `INSERT INTO invoices (
-        id, visit_id, patient_id, patient_name, items,
-        total_amount, paid_amount, payment_method, status,
-        created_at, updated_at, created_by, updated_by
-      )
-      VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8, $9, $10, $11, $12, $13)
-      RETURNING *`,
-      [
-        invoiceId, vId, pId, pName, JSON.stringify(parsedItems),
-        total, paid, method, status || "unpaid",
-        now, now, userId, userId,
-      ]
-    );
+    await db.prepare(
+      `INSERT INTO invoices (id, visit_id, patient_id, patient_name, items, total_amount, paid_amount, payment_method, status, created_at, updated_at, created_by, updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(invoiceId, vId, pId, pName, JSON.stringify(parsedItems), total, paid, method, body.status || "unpaid", now, now, userId, userId).run();
 
-    res.status(201).json(mapInvoiceRow(rows[0]));
+    const row = await db.prepare("SELECT * FROM invoices WHERE id=?").bind(invoiceId).first();
+    return c.json(mapInvoiceRow(row), 201);
   } catch (err) {
     console.error("POST /invoices error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-/**
- * PUT /invoices/:id
- * Update invoice fields
- * accountant: blocked (read-only)
- * senior_accountant: writes to invoice_overrides (overlay)
- */
-router.put("/:id", async (req, res) => {
+app.put("/:id", async (c) => {
   try {
-    const { role } = req.user;
-    const invoiceId = req.params.id;
+    const user = c.get("user");
+    const invoiceId = c.req.param("id");
+    const db = c.env.DB;
 
-    // Accountant is read-only
-    if (role === "accountant") {
-      return res.status(403).json({ error: "Read-only access" });
-    }
+    if (user.role === "accountant") return c.json({ error: "Read-only access" }, 403);
 
-    // Senior accountant: save to overlay table instead of real data
-    if (role === "senior_accountant") {
-      const { items, totalAmount, total_amount, paidAmount, paid_amount, paymentMethod, payment_method, status } = req.body;
+    const body = await c.req.json();
+
+    // Senior accountant: save to overlay table
+    if (user.role === "senior_accountant") {
       const overrideData = {};
-      if (items !== undefined) {
-        overrideData.items = items;
-        overrideData.totalAmount = items.reduce((s, i) => s + (parseFloat(i.price) || 0), 0);
+      if (body.items !== undefined) {
+        overrideData.items = body.items;
+        overrideData.totalAmount = body.items.reduce((s, i) => s + (parseFloat(i.price) || 0), 0);
       }
-      const total = totalAmount !== undefined ? totalAmount : total_amount;
-      if (total !== undefined && items === undefined) overrideData.totalAmount = total;
-      const paid = paidAmount !== undefined ? paidAmount : paid_amount;
+      const total = body.totalAmount !== undefined ? body.totalAmount : body.total_amount;
+      if (total !== undefined && body.items === undefined) overrideData.totalAmount = total;
+      const paid = body.paidAmount !== undefined ? body.paidAmount : body.paid_amount;
       if (paid !== undefined) overrideData.paidAmount = paid;
-      const method = paymentMethod !== undefined ? paymentMethod : payment_method;
+      const method = body.paymentMethod !== undefined ? body.paymentMethod : body.payment_method;
       if (method !== undefined) overrideData.paymentMethod = method;
-      if (status !== undefined) overrideData.status = status;
+      if (body.status !== undefined) overrideData.status = body.status;
 
-      const userId = req.user.id || req.user.username || "system";
-      await pool.query(
+      const userId = user.id || user.username || "system";
+      await db.prepare(
         `INSERT INTO invoice_overrides (invoice_id, override_data, modified_by, updated_at)
-         VALUES ($1, $2::jsonb, $3, NOW())
-         ON CONFLICT (invoice_id)
-         DO UPDATE SET override_data = $2::jsonb, modified_by = $3, updated_at = NOW()`,
-        [invoiceId, JSON.stringify(overrideData), userId]
-      );
-      return res.json({ success: true });
+         VALUES (?, ?, ?, datetime('now'))
+         ON CONFLICT (invoice_id) DO UPDATE SET override_data=excluded.override_data, modified_by=excluded.modified_by, updated_at=datetime('now')`
+      ).bind(invoiceId, JSON.stringify(overrideData), userId).run();
+      return c.json({ success: true });
     }
-
-    const {
-      items, totalAmount, total_amount,
-      paidAmount, paid_amount,
-      paymentMethod, payment_method,
-      status,
-    } = req.body;
 
     const sets = [];
     const params = [];
-    let idx = 1;
 
-    sets.push(`updated_at=$${idx++}`);
-    params.push(Date.now());
-    sets.push(`updated_by=$${idx++}`);
-    params.push(String(req.user.id || req.user.username || 'system'));
+    sets.push("updated_at=?"); params.push(Date.now());
+    sets.push("updated_by=?"); params.push(String(user.id || user.username || "system"));
 
-    if (items !== undefined) {
-      sets.push(`items=$${idx++}::jsonb`);
-      params.push(JSON.stringify(items));
-      const recalcTotal = items.reduce((s, i) => s + (parseFloat(i.price) || 0), 0);
-      sets.push(`total_amount=$${idx++}`);
-      params.push(recalcTotal);
+    if (body.items !== undefined) {
+      sets.push("items=?"); params.push(JSON.stringify(body.items));
+      const recalcTotal = body.items.reduce((s, i) => s + (parseFloat(i.price) || 0), 0);
+      sets.push("total_amount=?"); params.push(recalcTotal);
 
-      const { rows: currentRows } = await pool.query(
-        `SELECT paid_amount FROM invoices WHERE id=$1`, [invoiceId]
-      );
-      if (currentRows.length > 0) {
-        const currentPaid = parseFloat(currentRows[0].paid_amount) || 0;
-        if (currentPaid > recalcTotal) {
-          sets.push(`paid_amount=$${idx++}`);
-          params.push(recalcTotal);
-          sets.push(`status=$${idx++}`);
-          params.push('paid');
-        } else if (currentPaid > 0 && currentPaid < recalcTotal) {
-          sets.push(`status=$${idx++}`);
-          params.push('partial');
-        } else if (currentPaid === 0) {
-          sets.push(`status=$${idx++}`);
-          params.push('unpaid');
-        } else if (currentPaid >= recalcTotal) {
-          sets.push(`status=$${idx++}`);
-          params.push('paid');
-        }
+      const current = await db.prepare("SELECT paid_amount FROM invoices WHERE id=?").bind(invoiceId).first();
+      if (current) {
+        const currentPaid = parseFloat(current.paid_amount) || 0;
+        if (currentPaid > recalcTotal) { sets.push("paid_amount=?"); params.push(recalcTotal); sets.push("status=?"); params.push("paid"); }
+        else if (currentPaid > 0 && currentPaid < recalcTotal) { sets.push("status=?"); params.push("partial"); }
+        else if (currentPaid === 0) { sets.push("status=?"); params.push("unpaid"); }
+        else if (currentPaid >= recalcTotal) { sets.push("status=?"); params.push("paid"); }
       }
     }
 
-    const total = totalAmount !== undefined ? totalAmount : total_amount;
-    if (total !== undefined && items === undefined) {
-      sets.push(`total_amount=$${idx++}`);
-      params.push(total);
-    }
-
-    const paid = paidAmount !== undefined ? paidAmount : paid_amount;
-    if (paid !== undefined) {
-      sets.push(`paid_amount=$${idx++}`);
-      params.push(paid);
-    }
-
-    const method = paymentMethod !== undefined ? paymentMethod : payment_method;
-    if (method !== undefined) {
-      sets.push(`payment_method=$${idx++}`);
-      params.push(method);
-    }
-
-    if (status !== undefined) {
-      sets.push(`status=$${idx++}`);
-      params.push(status);
-    }
+    const total = body.totalAmount !== undefined ? body.totalAmount : body.total_amount;
+    if (total !== undefined && body.items === undefined) { sets.push("total_amount=?"); params.push(total); }
+    const paid = body.paidAmount !== undefined ? body.paidAmount : body.paid_amount;
+    if (paid !== undefined) { sets.push("paid_amount=?"); params.push(paid); }
+    const method = body.paymentMethod !== undefined ? body.paymentMethod : body.payment_method;
+    if (method !== undefined) { sets.push("payment_method=?"); params.push(method); }
+    if (body.status !== undefined) { sets.push("status=?"); params.push(body.status); }
 
     params.push(invoiceId);
-    const whereClause = `id=$${idx++}`;
-
-    await pool.query(
-      `UPDATE invoices SET ${sets.join(", ")} WHERE ${whereClause}`,
-      params
-    );
-
-    res.json({ success: true });
+    await db.prepare(`UPDATE invoices SET ${sets.join(", ")} WHERE id=?`).bind(...params).run();
+    return c.json({ success: true });
   } catch (err) {
     console.error("PUT /invoices/:id error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-/**
- * DELETE /invoices/:id
- * Delete an invoice
- * accountant: blocked
- * senior_accountant: marks as deleted in overlay only
- */
-router.delete("/:id", async (req, res) => {
+app.delete("/:id", async (c) => {
   try {
-    const { role } = req.user;
+    const user = c.get("user");
+    const db = c.env.DB;
 
-    if (role === "accountant") {
-      return res.status(403).json({ error: "Read-only access" });
-    }
+    if (user.role === "accountant") return c.json({ error: "Read-only access" }, 403);
 
-    // Senior accountant: overlay delete
-    if (role === "senior_accountant") {
-      const invoiceId = req.params.id;
-      const userId = req.user.id || req.user.username || "system";
-      await pool.query(
+    if (user.role === "senior_accountant") {
+      const invoiceId = c.req.param("id");
+      const userId = user.id || user.username || "system";
+      await db.prepare(
         `INSERT INTO invoice_overrides (invoice_id, is_deleted, modified_by, updated_at)
-         VALUES ($1, true, $2, NOW())
-         ON CONFLICT (invoice_id)
-         DO UPDATE SET is_deleted = true, modified_by = $2, updated_at = NOW()`,
-        [invoiceId, userId]
-      );
-      return res.json({ success: true });
+         VALUES (?, 1, ?, datetime('now'))
+         ON CONFLICT (invoice_id) DO UPDATE SET is_deleted=1, modified_by=excluded.modified_by, updated_at=datetime('now')`
+      ).bind(invoiceId, userId).run();
+      return c.json({ success: true });
     }
 
-    if (role !== "admin") {
-      return res.status(403).json({ error: "Forbidden" });
-    }
+    if (user.role !== "admin") return c.json({ error: "Forbidden" }, 403);
 
-    const invoiceId = req.params.id;
+    const invoiceId = c.req.param("id");
 
-    // Get the invoice to find visit_id and patient_id
-    const { rows: invRows } = await pool.query(
-      "SELECT visit_id, patient_id FROM invoices WHERE id=$1",
-      [invoiceId]
-    );
-
-    if (invRows.length > 0 && invRows[0].visit_id && invRows[0].patient_id) {
-      const { visit_id, patient_id } = invRows[0];
-
-      // Remove the visit from patient's history array
-      const { rows: patRows } = await pool.query(
-        "SELECT history FROM patients WHERE id=$1", [patient_id]
-      );
-      if (patRows.length > 0 && patRows[0].history) {
-        let history = patRows[0].history;
-        if (typeof history === "string") {
-          try { history = JSON.parse(history); } catch { history = []; }
-        }
+    const inv = await db.prepare("SELECT visit_id, patient_id FROM invoices WHERE id=?").bind(invoiceId).first();
+    if (inv && inv.visit_id && inv.patient_id) {
+      const pat = await db.prepare("SELECT history FROM patients WHERE id=?").bind(inv.patient_id).first();
+      if (pat && pat.history) {
+        let history = typeof pat.history === "string" ? JSON.parse(pat.history) : pat.history;
         if (Array.isArray(history)) {
-          const filtered = history.filter(v => v.visitId !== visit_id);
+          const filtered = history.filter((v) => v.visitId !== inv.visit_id);
           if (filtered.length !== history.length) {
-            await pool.query(
-              "UPDATE patients SET history=$1::jsonb WHERE id=$2",
-              [JSON.stringify(filtered), patient_id]
-            );
+            await db.prepare("UPDATE patients SET history=? WHERE id=?").bind(JSON.stringify(filtered), inv.patient_id).run();
           }
         }
       }
     }
 
-    // Delete the invoice
-    await pool.query("DELETE FROM invoices WHERE id=$1", [invoiceId]);
-    res.json({ success: true });
+    await db.prepare("DELETE FROM invoices WHERE id=?").bind(invoiceId).run();
+    return c.json({ success: true });
   } catch (err) {
     console.error("DELETE /invoices/:id error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-export default router;
+export default app;

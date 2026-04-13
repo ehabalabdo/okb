@@ -1,37 +1,33 @@
-import express from "express";
-import bcrypt from "bcrypt";
+import { Hono } from "hono";
 import crypto from "crypto";
-import pool from "../db.js";
-import { auth } from "../middleware/auth.js";
+import { authMiddleware } from "../middleware/auth.js";
+import { hashPassword } from "../utils/password.js";
 
-const router = express.Router();
-router.use(auth);
+const app = new Hono();
+app.use("*", authMiddleware);
 
 function makePassword() {
   return crypto.randomBytes(6).toString("base64url");
 }
 
-/**
- * GET /users
- * List all users
- */
-router.get("/", async (req, res) => {
+app.get("/", async (c) => {
   try {
-    const { rows } = await pool.query(
+    const { results } = await c.env.DB.prepare(
       `SELECT uid, name, email, role, clinic_ids, is_active, is_archived,
               created_at, created_by, updated_at, updated_by
        FROM users ORDER BY uid`
-    );
+    ).all();
 
-    const users = rows.map((row) => {
-      let clinicIds = Array.isArray(row.clinic_ids) ? row.clinic_ids : [];
+    const users = results.map((row) => {
+      let clinicIds = [];
+      try { clinicIds = typeof row.clinic_ids === "string" ? JSON.parse(row.clinic_ids) : (row.clinic_ids || []); } catch { clinicIds = []; }
       return {
         uid: String(row.uid),
         email: row.email,
         name: row.name,
         role: row.role,
         clinicIds,
-        isActive: row.is_active !== false,
+        isActive: row.is_active !== false && row.is_active !== 0,
         createdAt: row.created_at ? Number(row.created_at) : Date.now(),
         createdBy: row.created_by || "system",
         updatedAt: row.updated_at ? Number(row.updated_at) : Date.now(),
@@ -40,179 +36,113 @@ router.get("/", async (req, res) => {
       };
     });
 
-    res.json(users);
+    return c.json(users);
   } catch (err) {
     console.error("GET /users error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-/**
- * POST /users
- * Create any user (admin, doctor, receptionist, etc.)
- * Admin only
- */
-router.post("/", async (req, res) => {
+app.post("/", async (c) => {
   try {
-    const { role: callerRole } = req.user;
-    if (callerRole !== "admin") {
-      return res.status(403).json({ error: "Forbidden" });
-    }
+    const user = c.get("user");
+    if (user.role !== "admin") return c.json({ error: "Forbidden" }, 403);
 
-    const { name, full_name, email, password, role, clinic_ids, is_active } = req.body;
-
+    const { name, full_name, email, password, role, clinic_ids, is_active } = await c.req.json();
     const userName = name || full_name;
-    if (!userName || !role) {
-      return res.status(400).json({ error: "name and role required" });
-    }
+    if (!userName || !role) return c.json({ error: "name and role required" }, 400);
 
+    const db = c.env.DB;
     const plainPassword = password || makePassword();
-    const hashedPassword = await bcrypt.hash(plainPassword, 10);
-    const clinicIdsArr = clinic_ids || [];
-    const uid = role + '_' + Date.now();
+    const hashedPassword = await hashPassword(plainPassword);
+    const clinicIdsJson = JSON.stringify(clinic_ids || []);
+    const uid = role + "_" + Date.now();
     const now = Date.now();
 
-    const { rows } = await pool.query(
-      `INSERT INTO users (uid, name, email, password, role, clinic_ids,
-                          created_at, updated_at, created_by, updated_by, is_active, is_archived)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'system', 'system', $9, false)
-       RETURNING uid, name, email, role`,
-      [uid, userName, email || null, hashedPassword, role, clinicIdsArr, now, now, is_active !== false]
-    );
+    await db.prepare(
+      `INSERT INTO users (uid, name, email, password, role, clinic_ids, created_at, updated_at, created_by, updated_by, is_active, is_archived)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'system', 'system', ?, 0)`
+    ).bind(uid, userName, email || null, hashedPassword, role, clinicIdsJson, now, now, is_active !== false ? 1 : 0).run();
 
-    res.status(201).json({
-      user: rows[0],
-      credentials: { password: plainPassword },
-    });
+    return c.json({ user: { uid, name: userName, email, role }, credentials: { password: plainPassword } }, 201);
   } catch (err) {
-    if (err.code === "23505") {
-      return res.status(409).json({ error: "User already exists" });
-    }
+    if (err.message?.includes("UNIQUE")) return c.json({ error: "User already exists" }, 409);
     console.error("POST /users error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-/**
- * POST /users/doctors
- * Legacy endpoint: create doctor with auto-generated credentials
- */
-router.post("/doctors", async (req, res) => {
+app.post("/doctors", async (c) => {
   try {
-    const { role: callerRole } = req.user;
-    if (callerRole !== "admin") {
-      return res.status(403).json({ error: "Forbidden" });
-    }
+    const user = c.get("user");
+    if (user.role !== "admin") return c.json({ error: "Forbidden" }, 403);
 
-    const { full_name, name: bodyName, email } = req.body;
+    const { full_name, name: bodyName, email } = await c.req.json();
     const doctorName = bodyName || full_name;
-    if (!doctorName) {
-      return res.status(400).json({ error: "name required" });
-    }
+    if (!doctorName) return c.json({ error: "name required" }, 400);
 
+    const db = c.env.DB;
     const password = makePassword();
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const uid = 'doctor_' + Date.now();
+    const hashedPassword = await hashPassword(password);
+    const uid = "doctor_" + Date.now();
     const now = Date.now();
 
-    const { rows } = await pool.query(
-      `INSERT INTO users (uid, name, email, role, password,
-                          created_at, updated_at, created_by, updated_by, is_active, is_archived, clinic_ids)
-       VALUES ($1, $2, $3, 'doctor', $4, $5, $6, 'system', 'system', true, false, $7)
-       RETURNING uid, name, email`,
-      [uid, doctorName, email || null, hashedPassword, now, now, []]
-    );
-    return res.status(201).json({
-      doctor: rows[0],
-      credentials: { email: email, password },
-    });
+    await db.prepare(
+      `INSERT INTO users (uid, name, email, role, password, created_at, updated_at, created_by, updated_by, is_active, is_archived, clinic_ids)
+       VALUES (?, ?, ?, 'doctor', ?, ?, ?, 'system', 'system', 1, 0, '[]')`
+    ).bind(uid, doctorName, email || null, hashedPassword, now, now).run();
+
+    return c.json({ doctor: { uid, name: doctorName, email }, credentials: { email, password } }, 201);
   } catch (err) {
     console.error("POST /users/doctors error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-/**
- * PUT /users/:id
- * Update user fields
- * Admin only
- */
-router.put("/:id", async (req, res) => {
+app.put("/:id", async (c) => {
   try {
-    const { role: callerRole } = req.user;
-    if (callerRole !== "admin") {
-      return res.status(403).json({ error: "Forbidden" });
-    }
+    const user = c.get("user");
+    if (user.role !== "admin") return c.json({ error: "Forbidden" }, 403);
 
-    const userId = req.params.id;
-    const { name, full_name, email, password, role, clinic_ids, is_active } = req.body;
-
+    const userId = c.req.param("id");
+    const body = await c.req.json();
+    const db = c.env.DB;
     const now = Date.now();
+
     const sets = [`updated_at=${now}`];
     const params = [];
-    let idx = 1;
 
-    const userName = name || full_name;
-    if (userName !== undefined) {
-      sets.push(`name=$${idx++}`);
-      params.push(userName);
+    const userName = body.name || body.full_name;
+    if (userName !== undefined) { sets.push("name=?"); params.push(userName); }
+    if (body.email !== undefined) { sets.push("email=?"); params.push(body.email); }
+    if (body.password !== undefined && body.password !== "") {
+      const hashed = await hashPassword(body.password);
+      sets.push("password=?"); params.push(hashed);
     }
-    if (email !== undefined) {
-      sets.push(`email=$${idx++}`);
-      params.push(email);
-    }
-    if (password !== undefined && password !== "") {
-      const hashed = await bcrypt.hash(password, 10);
-      sets.push(`password=$${idx++}`);
-      params.push(hashed);
-    }
-    if (role !== undefined) {
-      sets.push(`role=$${idx++}`);
-      params.push(role);
-    }
-    if (clinic_ids !== undefined) {
-      sets.push(`clinic_ids=$${idx++}`);
-      params.push(Array.isArray(clinic_ids) ? clinic_ids : []);
-    }
-    if (is_active !== undefined) {
-      sets.push(`is_active=$${idx++}`);
-      params.push(is_active);
-    }
+    if (body.role !== undefined) { sets.push("role=?"); params.push(body.role); }
+    if (body.clinic_ids !== undefined) { sets.push("clinic_ids=?"); params.push(JSON.stringify(Array.isArray(body.clinic_ids) ? body.clinic_ids : [])); }
+    if (body.is_active !== undefined) { sets.push("is_active=?"); params.push(body.is_active ? 1 : 0); }
 
     params.push(userId);
-    const whereClause = `uid=$${idx++}`;
+    await db.prepare(`UPDATE users SET ${sets.join(", ")} WHERE uid=?`).bind(...params).run();
 
-    await pool.query(
-      `UPDATE users SET ${sets.join(", ")} WHERE ${whereClause}`,
-      params
-    );
-
-    res.json({ success: true });
+    return c.json({ success: true });
   } catch (err) {
     console.error("PUT /users/:id error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-/**
- * DELETE /users/:id
- * Delete a user
- * Admin only
- */
-router.delete("/:id", async (req, res) => {
+app.delete("/:id", async (c) => {
   try {
-    const { role: callerRole } = req.user;
-    if (callerRole !== "admin") {
-      return res.status(403).json({ error: "Forbidden" });
-    }
-
-    const userId = req.params.id;
-    await pool.query("DELETE FROM users WHERE uid=$1", [userId]);
-    res.json({ success: true });
+    const user = c.get("user");
+    if (user.role !== "admin") return c.json({ error: "Forbidden" }, 403);
+    await c.env.DB.prepare("DELETE FROM users WHERE uid=?").bind(c.req.param("id")).run();
+    return c.json({ success: true });
   } catch (err) {
     console.error("DELETE /users/:id error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-export default router;
+export default app;

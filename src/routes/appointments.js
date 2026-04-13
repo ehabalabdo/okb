@@ -1,13 +1,9 @@
-import express from "express";
-import pool from "../db.js";
-import { auth } from "../middleware/auth.js";
+import { Hono } from "hono";
+import { authMiddleware } from "../middleware/auth.js";
 
-const router = express.Router();
-router.use(auth);
+const app = new Hono();
+app.use("*", authMiddleware);
 
-/**
- * Map a DB row to frontend-compatible Appointment shape.
- */
 function mapAppointmentRow(row) {
   return {
     id: String(row.id),
@@ -27,318 +23,230 @@ function mapAppointmentRow(row) {
   };
 }
 
-// Helper: get epoch-ms range for "today"
 function todayRange() {
   const now = new Date();
   const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const end = start + 86400000;
-  return { start, end };
+  return { start, end: start + 86400000 };
 }
 
-// Helper: get epoch-ms range for "this week" (next 7 days)
 function weekRange() {
   const { start } = todayRange();
   return { start, end: start + 7 * 86400000 };
 }
 
-/**
- * GET /appointments
- * List all appointments
- */
-router.get("/", async (req, res) => {
+app.get("/", async (c) => {
   try {
-    const { rows } = await pool.query(
-      "SELECT * FROM appointments ORDER BY date DESC"
-    );
-    res.json(rows.map(mapAppointmentRow));
+    const { results } = await c.env.DB.prepare("SELECT * FROM appointments ORDER BY date DESC").all();
+    return c.json(results.map(mapAppointmentRow));
   } catch (err) {
     console.error("GET /appointments error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-/**
- * GET /appointments/by-patient/:patientId
- */
-router.get("/by-patient/:patientId", async (req, res) => {
+app.get("/by-patient/:patientId", async (c) => {
   try {
-    const patientId = req.params.patientId;
-    const { rows } = await pool.query(
-      "SELECT * FROM appointments WHERE patient_id=$1 ORDER BY date DESC",
-      [patientId]
-    );
-    res.json(rows.map(mapAppointmentRow));
+    const { results } = await c.env.DB.prepare(
+      "SELECT * FROM appointments WHERE patient_id=? ORDER BY date DESC"
+    ).bind(c.req.param("patientId")).all();
+    return c.json(results.map(mapAppointmentRow));
   } catch (err) {
     console.error("GET /appointments/by-patient error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-/**
- * GET /appointments/today
- */
-router.get("/today", async (req, res) => {
+app.get("/today", async (c) => {
   try {
-    const { role, uid } = req.user;
+    const user = c.get("user");
     const { start, end } = todayRange();
+    const db = c.env.DB;
 
-    if (role === "doctor") {
-      const { rows } = await pool.query(
-        "SELECT * FROM appointments WHERE doctor_id=$1 AND date >= $2 AND date < $3 ORDER BY date",
-        [uid, start, end]
-      );
-      return res.json(rows.map(mapAppointmentRow));
+    if (user.role === "doctor") {
+      const { results } = await db.prepare(
+        "SELECT * FROM appointments WHERE doctor_id=? AND date >= ? AND date < ? ORDER BY date"
+      ).bind(user.uid, start, end).all();
+      return c.json(results.map(mapAppointmentRow));
     }
 
-    if (["admin", "receptionist", "secretary"].includes(role)) {
-      const { rows } = await pool.query(
-        "SELECT * FROM appointments WHERE date >= $1 AND date < $2 ORDER BY date",
-        [start, end]
-      );
-      return res.json(rows.map(mapAppointmentRow));
+    if (["admin", "receptionist", "secretary"].includes(user.role)) {
+      const { results } = await db.prepare(
+        "SELECT * FROM appointments WHERE date >= ? AND date < ? ORDER BY date"
+      ).bind(start, end).all();
+      return c.json(results.map(mapAppointmentRow));
     }
 
-    res.status(403).json({ error: "Forbidden" });
+    return c.json({ error: "Forbidden" }, 403);
   } catch (err) {
     console.error("GET /appointments/today error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-/**
- * GET /appointments/week
- */
-router.get("/week", async (req, res) => {
+app.get("/week", async (c) => {
   try {
-    const { role, uid } = req.user;
+    const user = c.get("user");
     const { start, end } = weekRange();
+    const db = c.env.DB;
 
-    if (role === "doctor") {
-      const { rows } = await pool.query(
-        "SELECT * FROM appointments WHERE doctor_id=$1 AND date >= $2 AND date < $3 ORDER BY date",
-        [uid, start, end]
-      );
-      return res.json(rows.map(mapAppointmentRow));
+    if (user.role === "doctor") {
+      const { results } = await db.prepare(
+        "SELECT * FROM appointments WHERE doctor_id=? AND date >= ? AND date < ? ORDER BY date"
+      ).bind(user.uid, start, end).all();
+      return c.json(results.map(mapAppointmentRow));
     }
 
-    const { rows } = await pool.query(
-      "SELECT * FROM appointments WHERE date >= $1 AND date < $2 ORDER BY date",
-      [start, end]
-    );
-    res.json(rows.map(mapAppointmentRow));
+    const { results } = await db.prepare(
+      "SELECT * FROM appointments WHERE date >= ? AND date < ? ORDER BY date"
+    ).bind(start, end).all();
+    return c.json(results.map(mapAppointmentRow));
   } catch (err) {
     console.error("GET /appointments/week error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-/**
- * GET /appointments/day?date=YYYY-MM-DD
- */
-router.get("/day", async (req, res) => {
+app.get("/day", async (c) => {
   try {
-    const { date } = req.query;
-    if (!date) return res.status(400).json({ error: "date required" });
+    const date = c.req.query("date");
+    if (!date) return c.json({ error: "date required" }, 400);
 
-    const { role, uid } = req.user;
+    const user = c.get("user");
     const dayStart = new Date(date + "T00:00:00").getTime();
     const dayEnd = dayStart + 86400000;
+    const db = c.env.DB;
 
-    if (role === "doctor") {
-      const { rows } = await pool.query(
-        "SELECT * FROM appointments WHERE doctor_id=$1 AND date >= $2 AND date < $3 ORDER BY date",
-        [uid, dayStart, dayEnd]
-      );
-      return res.json(rows.map(mapAppointmentRow));
+    if (user.role === "doctor") {
+      const { results } = await db.prepare(
+        "SELECT * FROM appointments WHERE doctor_id=? AND date >= ? AND date < ? ORDER BY date"
+      ).bind(user.uid, dayStart, dayEnd).all();
+      return c.json(results.map(mapAppointmentRow));
     }
 
-    const { rows } = await pool.query(
-      "SELECT * FROM appointments WHERE date >= $1 AND date < $2 ORDER BY date",
-      [dayStart, dayEnd]
-    );
-    res.json(rows.map(mapAppointmentRow));
+    const { results } = await db.prepare(
+      "SELECT * FROM appointments WHERE date >= ? AND date < ? ORDER BY date"
+    ).bind(dayStart, dayEnd).all();
+    return c.json(results.map(mapAppointmentRow));
   } catch (err) {
     console.error("GET /appointments/day error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-/**
- * POST /appointments
- * Create a new appointment.
- */
-router.post("/", async (req, res) => {
+app.post("/", async (c) => {
   try {
-    const { role, uid: userId } = req.user;
-    if (!["admin", "receptionist", "secretary", "doctor"].includes(role)) {
-      return res.status(403).json({ error: "Forbidden" });
+    const user = c.get("user");
+    if (!["admin", "receptionist", "secretary", "doctor"].includes(user.role)) {
+      return c.json({ error: "Forbidden" }, 403);
     }
 
-    const {
-      patient_id, patientId,
-      patient_name, patientName,
-      doctor_id, doctorId,
-      clinic_id, clinicId,
-      start_time, date,
-      reason, status,
-    } = req.body;
-
-    const pId = String(patient_id || patientId || "");
-    const dId = (doctor_id || doctorId) ? String(doctor_id || doctorId) : null;
-    const cId = String(clinic_id || clinicId || "");
-    const pName = patient_name || patientName || "";
+    const body = await c.req.json();
+    const pId = String(body.patient_id || body.patientId || "");
+    const dId = (body.doctor_id || body.doctorId) ? String(body.doctor_id || body.doctorId) : null;
+    const cId = String(body.clinic_id || body.clinicId || "");
+    const pName = body.patient_name || body.patientName || "";
 
     let dateEpoch;
-    if (date !== undefined) {
-      dateEpoch = typeof date === "number" ? date : new Date(date).getTime();
-    } else if (start_time) {
-      dateEpoch = new Date(start_time).getTime();
+    if (body.date !== undefined) {
+      dateEpoch = typeof body.date === "number" ? body.date : new Date(body.date).getTime();
+    } else if (body.start_time) {
+      dateEpoch = new Date(body.start_time).getTime();
     }
 
-    if (!pId || !dateEpoch) {
-      return res.status(400).json({ error: "patient_id and date required" });
-    }
+    if (!pId || !dateEpoch) return c.json({ error: "patient_id and date required" }, 400);
 
     const appointmentId = "apt_" + Date.now();
     const now = Date.now();
+    const userId = user.uid || "system";
 
-    const { rows } = await pool.query(
-      `INSERT INTO appointments
-       (id, patient_id, patient_name, clinic_id, doctor_id, date, status, reason,
-        created_at, created_by, updated_at, updated_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-       RETURNING *`,
-      [
-        appointmentId, pId, pName, cId, dId, dateEpoch,
-        status || "scheduled", reason || "",
-        now, userId || "system", now, userId || "system",
-      ]
-    );
+    await c.env.DB.prepare(
+      `INSERT INTO appointments (id, patient_id, patient_name, clinic_id, doctor_id, date, status, reason, created_at, created_by, updated_at, updated_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(appointmentId, pId, pName, cId, dId, dateEpoch, body.status || "scheduled", body.reason || "", now, userId, now, userId).run();
 
-    res.status(201).json(mapAppointmentRow(rows[0]));
+    const row = await c.env.DB.prepare("SELECT * FROM appointments WHERE id=?").bind(appointmentId).first();
+    return c.json(mapAppointmentRow(row), 201);
   } catch (err) {
-    if (err.code === "23505") {
-      return res.status(409).json({ error: "Appointment conflict" });
-    }
+    if (err.message?.includes("UNIQUE")) return c.json({ error: "Appointment conflict" }, 409);
     console.error("POST /appointments error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-/**
- * PUT /appointments/:id
- * Update appointment fields
- */
-router.put("/:id", async (req, res) => {
+app.put("/:id", async (c) => {
   try {
-    const role = req.user.role || req.user.type;
+    const user = c.get("user");
+    const role = user.role || user.type;
     if (!["admin", "receptionist", "secretary", "doctor"].includes(role)) {
-      return res.status(403).json({ error: "Forbidden" });
+      return c.json({ error: "Forbidden" }, 403);
     }
-    const { uid: userId } = req.user;
-    const appointmentId = req.params.id;
 
-    const {
-      status, reason,
-      clinic_id, clinicId,
-      doctor_id, doctorId,
-      start_time, date,
-    } = req.body;
-
+    const appointmentId = c.req.param("id");
+    const body = await c.req.json();
     const now = Date.now();
+    const db = c.env.DB;
+
     const sets = [`updated_at=${now}`];
     const params = [];
-    let idx = 1;
 
-    if (status !== undefined) {
-      sets.push(`status=$${idx++}`);
-      params.push(status);
-    }
-    if (reason !== undefined) {
-      sets.push(`reason=$${idx++}`);
-      params.push(reason);
-    }
+    if (body.status !== undefined) { sets.push("status=?"); params.push(body.status); }
+    if (body.reason !== undefined) { sets.push("reason=?"); params.push(body.reason); }
 
-    const cId = clinic_id || clinicId;
-    if (cId !== undefined) {
-      sets.push(`clinic_id=$${idx++}`);
-      params.push(String(cId));
-    }
+    const cId = body.clinic_id || body.clinicId;
+    if (cId !== undefined) { sets.push("clinic_id=?"); params.push(String(cId)); }
 
-    const dId = doctor_id || doctorId;
-    if (dId !== undefined) {
-      sets.push(`doctor_id=$${idx++}`);
-      params.push(dId ? String(dId) : null);
-    }
+    const dId = body.doctor_id || body.doctorId;
+    if (dId !== undefined) { sets.push("doctor_id=?"); params.push(dId ? String(dId) : null); }
 
-    const dateVal = date !== undefined ? date : (start_time ? new Date(start_time).getTime() : undefined);
+    const dateVal = body.date !== undefined ? body.date : (body.start_time ? new Date(body.start_time).getTime() : undefined);
     if (dateVal !== undefined) {
-      const epoch = typeof dateVal === "number" ? dateVal : new Date(dateVal).getTime();
-      sets.push(`date=$${idx++}`);
-      params.push(epoch);
+      sets.push("date=?");
+      params.push(typeof dateVal === "number" ? dateVal : new Date(dateVal).getTime());
     }
 
-    sets.push(`updated_by=$${idx++}`);
-    params.push(userId || "system");
-
+    sets.push("updated_by=?");
+    params.push(user.uid || "system");
     params.push(appointmentId);
-    const whereClause = `id=$${idx++}`;
 
-    await pool.query(
-      `UPDATE appointments SET ${sets.join(", ")} WHERE ${whereClause}`,
-      params
-    );
-
-    res.json({ success: true });
+    await db.prepare(`UPDATE appointments SET ${sets.join(", ")} WHERE id=?`).bind(...params).run();
+    return c.json({ success: true });
   } catch (err) {
     console.error("PUT /appointments/:id error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-/**
- * PUT /appointments/:id/status
- */
-router.put("/:id/status", async (req, res) => {
+app.put("/:id/status", async (c) => {
   try {
-    const { role, uid: userId } = req.user;
-    const { status } = req.body;
-
-    if (!["admin", "doctor", "receptionist", "secretary"].includes(role)) {
-      return res.status(403).json({ error: "Forbidden" });
+    const user = c.get("user");
+    if (!["admin", "doctor", "receptionist", "secretary"].includes(user.role)) {
+      return c.json({ error: "Forbidden" }, 403);
     }
 
-    const now = Date.now();
-    const appointmentId = req.params.id;
+    const { status } = await c.req.json();
+    await c.env.DB.prepare(
+      "UPDATE appointments SET status=?, updated_by=?, updated_at=? WHERE id=?"
+    ).bind(status, user.uid, Date.now(), c.req.param("id")).run();
 
-    await pool.query(
-      "UPDATE appointments SET status=$1, updated_by=$2, updated_at=$3 WHERE id=$4",
-      [status, userId, now, appointmentId]
-    );
-    res.json({ success: true });
+    return c.json({ success: true });
   } catch (err) {
     console.error("PUT /appointments/:id/status error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-/**
- * DELETE /appointments/:id
- */
-router.delete("/:id", async (req, res) => {
+app.delete("/:id", async (c) => {
   try {
-    const { role } = req.user;
-    if (!["admin", "receptionist", "secretary"].includes(role)) {
-      return res.status(403).json({ error: "Forbidden" });
+    const user = c.get("user");
+    if (!["admin", "receptionist", "secretary"].includes(user.role)) {
+      return c.json({ error: "Forbidden" }, 403);
     }
-
-    const appointmentId = req.params.id;
-    await pool.query("DELETE FROM appointments WHERE id=$1", [appointmentId]);
-    res.json({ success: true });
+    await c.env.DB.prepare("DELETE FROM appointments WHERE id=?").bind(c.req.param("id")).run();
+    return c.json({ success: true });
   } catch (err) {
     console.error("DELETE /appointments/:id error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-export default router;
+export default app;

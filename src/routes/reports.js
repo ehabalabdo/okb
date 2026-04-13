@@ -1,106 +1,97 @@
-import express from "express";
-import pool from "../db.js";
-import { auth } from "../middleware/auth.js";
+import { Hono } from "hono";
+import { authMiddleware } from "../middleware/auth.js";
 
-const router = express.Router();
-router.use(auth);
+const app = new Hono();
+app.use("*", authMiddleware);
 
-// Only admin / doctor / secretary can view reports
-function requireStaff(req, res, next) {
-  const role = req.user.role;
-  if (!["admin", "doctor", "secretary"].includes(role)) {
-    return res.status(403).json({ error: "Access denied" });
-  }
-  next();
-}
-router.use(requireStaff);
+// Only admin / doctor / secretary
+app.use("*", async (c, next) => {
+  const user = c.get("user");
+  if (!["admin", "doctor", "secretary"].includes(user.role)) return c.json({ error: "Access denied" }, 403);
+  return next();
+});
 
-// Doctor load (appointments per week)
-router.get("/doctor-load", async (req, res) => {
+app.get("/doctor-load", async (c) => {
   try {
-    const { from, to } = req.query;
-    if (!from || !to) return res.status(400).json({ error: "from and to query params required" });
+    const from = c.req.query("from");
+    const to = c.req.query("to");
+    if (!from || !to) return c.json({ error: "from and to query params required" }, 400);
 
     const fromMs = isNaN(Number(from)) ? new Date(from).getTime() : Number(from);
     const toMs = isNaN(Number(to)) ? new Date(to).getTime() : Number(to);
 
-    const { rows } = await pool.query(
+    const { results } = await c.env.DB.prepare(
       `SELECT u.name AS doctor, COUNT(a.id) AS total
        FROM appointments a
        JOIN users u ON a.doctor_id = u.uid
-       WHERE a.date BETWEEN $1 AND $2
+       WHERE a.date BETWEEN ? AND ?
        GROUP BY u.name
-       ORDER BY total DESC`,
-      [fromMs, toMs]
-    );
+       ORDER BY total DESC`
+    ).bind(fromMs, toMs).all();
 
-    res.json(rows);
+    return c.json(results);
   } catch (err) {
     console.error("GET /reports/doctor-load error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-// Cancellations (Cancelled / No-show)
-router.get("/cancellations", async (req, res) => {
+app.get("/cancellations", async (c) => {
   try {
-    const { from, to } = req.query;
-    if (!from || !to) return res.status(400).json({ error: "from and to query params required" });
+    const from = c.req.query("from");
+    const to = c.req.query("to");
+    if (!from || !to) return c.json({ error: "from and to query params required" }, 400);
 
     const fromMs = isNaN(Number(from)) ? new Date(from).getTime() : Number(from);
     const toMs = isNaN(Number(to)) ? new Date(to).getTime() : Number(to);
 
-    const { rows } = await pool.query(
+    const { results } = await c.env.DB.prepare(
       `SELECT status, COUNT(*) AS total
        FROM appointments
        WHERE status IN ('cancelled','no_show')
-         AND date BETWEEN $1 AND $2
-       GROUP BY status`,
-      [fromMs, toMs]
-    );
+         AND date BETWEEN ? AND ?
+       GROUP BY status`
+    ).bind(fromMs, toMs).all();
 
-    res.json(rows);
+    return c.json(results);
   } catch (err) {
     console.error("GET /reports/cancellations error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-// Peak hours (by hour)
-router.get("/peak-hours", async (req, res) => {
+app.get("/peak-hours", async (c) => {
   try {
-    const { from, to } = req.query;
-    if (!from || !to) return res.status(400).json({ error: "from and to query params required" });
+    const from = c.req.query("from");
+    const to = c.req.query("to");
+    if (!from || !to) return c.json({ error: "from and to query params required" }, 400);
 
     const fromMs = isNaN(Number(from)) ? new Date(from).getTime() : Number(from);
     const toMs = isNaN(Number(to)) ? new Date(to).getTime() : Number(to);
 
-    const { rows } = await pool.query(
-      `SELECT EXTRACT(HOUR FROM to_timestamp(date / 1000.0)) AS hour, COUNT(*) AS total
+    const { results } = await c.env.DB.prepare(
+      `SELECT CAST(strftime('%H', date/1000, 'unixepoch') AS INTEGER) AS hour, COUNT(*) AS total
        FROM appointments
-       WHERE date BETWEEN $1 AND $2
+       WHERE date BETWEEN ? AND ?
        GROUP BY hour
-       ORDER BY total DESC`,
-      [fromMs, toMs]
-    );
+       ORDER BY total DESC`
+    ).bind(fromMs, toMs).all();
 
-    res.json(rows);
+    return c.json(results);
   } catch (err) {
     console.error("GET /reports/peak-hours error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-// ===================== FINANCIAL REPORTS =====================
-
-// Financial summary
-router.get("/financial-summary", async (req, res) => {
+app.get("/financial-summary", async (c) => {
   try {
-    const { from, to } = req.query;
+    const from = c.req.query("from");
+    const to = c.req.query("to");
     const fromMs = from ? (isNaN(Number(from)) ? new Date(from).getTime() : Number(from)) : 0;
     const toMs = to ? (isNaN(Number(to)) ? new Date(to).getTime() : Number(to)) : Date.now();
 
-    const { rows } = await pool.query(
+    const row = await c.env.DB.prepare(
       `SELECT
          COUNT(*) AS total_invoices,
          COALESCE(SUM(total_amount), 0) AS total_revenue,
@@ -113,98 +104,83 @@ router.get("/financial-summary", async (req, res) => {
          COUNT(CASE WHEN status = 'unpaid' THEN 1 END) AS unpaid_count,
          COUNT(CASE WHEN status = 'partial' THEN 1 END) AS partial_count
        FROM invoices
-       WHERE created_at BETWEEN $1 AND $2`,
-      [fromMs, toMs]
-    );
+       WHERE created_at BETWEEN ? AND ?`
+    ).bind(fromMs, toMs).first();
 
-    res.json(rows[0] || {});
+    return c.json(row || {});
   } catch (err) {
     console.error("GET /reports/financial-summary error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-// Daily revenue (last N days)
-router.get("/daily-revenue", async (req, res) => {
+app.get("/daily-revenue", async (c) => {
   try {
-    const { days } = req.query;
+    const days = c.req.query("days");
     const numDays = Math.min(parseInt(days) || 30, 365);
     const fromMs = Date.now() - numDays * 24 * 60 * 60 * 1000;
 
-    const { rows } = await pool.query(
+    const { results } = await c.env.DB.prepare(
       `SELECT
-         to_char(to_timestamp(created_at / 1000.0), 'YYYY-MM-DD') AS day,
+         strftime('%Y-%m-%d', created_at/1000, 'unixepoch') AS day,
          COALESCE(SUM(total_amount), 0) AS total,
          COALESCE(SUM(paid_amount), 0) AS collected,
          COUNT(*) AS invoice_count
        FROM invoices
-       WHERE created_at >= $1
+       WHERE created_at >= ?
        GROUP BY day
-       ORDER BY day ASC`,
-      [fromMs]
-    );
+       ORDER BY day ASC`
+    ).bind(fromMs).all();
 
-    res.json(rows);
+    return c.json(results);
   } catch (err) {
     console.error("GET /reports/daily-revenue error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-// Payment methods report
-router.get("/payment-methods", async (req, res) => {
+app.get("/payment-methods", async (c) => {
   try {
-    const { from, to } = req.query;
+    const from = c.req.query("from");
+    const to = c.req.query("to");
     const fromMs = from ? (isNaN(Number(from)) ? new Date(from).getTime() : Number(from)) : 0;
     const toMs = to ? (isNaN(Number(to)) ? new Date(to).getTime() : Number(to)) : Date.now();
 
-    const { rows } = await pool.query(
-      `SELECT
-         payment_method,
-         COUNT(*) AS count,
-         COALESCE(SUM(total_amount), 0) AS total,
-         COALESCE(SUM(paid_amount), 0) AS collected
-       FROM invoices
-       WHERE created_at BETWEEN $1 AND $2
-       GROUP BY payment_method
-       ORDER BY total DESC`,
-      [fromMs, toMs]
-    );
+    const { results } = await c.env.DB.prepare(
+      `SELECT payment_method, COUNT(*) AS count, COALESCE(SUM(total_amount), 0) AS total, COALESCE(SUM(paid_amount), 0) AS collected
+       FROM invoices WHERE created_at BETWEEN ? AND ? GROUP BY payment_method ORDER BY total DESC`
+    ).bind(fromMs, toMs).all();
 
-    res.json(rows);
+    return c.json(results);
   } catch (err) {
     console.error("GET /reports/payment-methods error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-// Top services by revenue
-router.get("/top-services", async (req, res) => {
+app.get("/top-services", async (c) => {
   try {
-    const { from, to } = req.query;
+    const from = c.req.query("from");
+    const to = c.req.query("to");
     const fromMs = from ? (isNaN(Number(from)) ? new Date(from).getTime() : Number(from)) : 0;
     const toMs = to ? (isNaN(Number(to)) ? new Date(to).getTime() : Number(to)) : Date.now();
 
-    const { rows } = await pool.query(
-      `SELECT
-         item->>'description' AS service_name,
-         COUNT(*) AS count,
-         COALESCE(SUM((item->>'price')::numeric), 0) AS total
-       FROM invoices,
-            jsonb_array_elements(items) AS item
-       WHERE items IS NOT NULL AND jsonb_typeof(items) = 'array'
-         AND created_at BETWEEN $1 AND $2
+    const { results } = await c.env.DB.prepare(
+      `SELECT json_extract(j.value, '$.description') AS service_name,
+              COUNT(*) AS count,
+              COALESCE(SUM(CAST(json_extract(j.value, '$.price') AS REAL)), 0) AS total
+       FROM invoices, json_each(items) AS j
+       WHERE items IS NOT NULL AND json_type(items) = 'array'
+         AND created_at BETWEEN ? AND ?
        GROUP BY service_name
-       ORDER BY total DESC
-       LIMIT 20`,
-      [fromMs, toMs]
-    );
+       ORDER BY total DESC LIMIT 20`
+    ).bind(fromMs, toMs).all();
 
-    res.json(rows);
+    return c.json(results);
   } catch (err) {
     console.error("GET /reports/top-services error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-export default router;
+export default app;

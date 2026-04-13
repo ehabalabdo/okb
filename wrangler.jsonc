@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "tkc-api",
+  "main": "src/index.js",
+  "compatibility_date": "2024-12-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "tkc-db",
+      "database_id": "2b5e35d3-9934-41e0-ac2d-f14173eb063c"
+    }
+  ]
+}

@@ -1,24 +1,24 @@
-﻿import express from "express";
-import pool from "../db.js";
-import { auth } from "../middleware/auth.js";
+﻿import { Hono } from "hono";
+import { authMiddleware } from "../middleware/auth.js";
 
-const router = express.Router();
-router.use(auth);
+const app = new Hono();
+app.use("*", authMiddleware);
 
 /**
  * GET /clinics
  * List all clinics
  */
-router.get("/", async (req, res) => {
+app.get("/", async (c) => {
   try {
-    const { rows } = await pool.query(`SELECT * FROM clinics ORDER BY id`);
+    const db = c.env.DB;
+    const { results } = await db.prepare("SELECT * FROM clinics ORDER BY id").all();
 
-    const clinics = rows.map((row) => ({
+    const clinics = results.map((row) => ({
       id: String(row.id),
       name: row.name,
       type: row.type || "General",
       category: row.category || "clinic",
-      active: row.active !== false,
+      active: row.active !== false && row.active !== 0,
       createdAt: row.created_at ? Number(row.created_at) : Date.now(),
       createdBy: row.created_by || "system",
       updatedAt: row.updated_at ? Number(row.updated_at) : Date.now(),
@@ -26,10 +26,10 @@ router.get("/", async (req, res) => {
       isArchived: row.is_archived || false,
     }));
 
-    res.json(clinics);
+    return c.json(clinics);
   } catch (err) {
     console.error("GET /clinics error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
@@ -37,36 +37,45 @@ router.get("/", async (req, res) => {
  * POST /clinics
  * Create a new clinic/department (Admin only)
  */
-router.post("/", async (req, res) => {
+app.post("/", async (c) => {
   try {
-    const { role } = req.user;
-    if (role !== "admin") {
-      return res.status(403).json({ error: "Forbidden" });
+    const user = c.get("user");
+    if (user.role !== "admin") {
+      return c.json({ error: "Forbidden" }, 403);
     }
 
-    const { name, type, category, active } = req.body;
+    const { name, type, category, active } = await c.req.json();
     if (!name) {
-      return res.status(400).json({ error: "name required" });
+      return c.json({ error: "name required" }, 400);
     }
 
+    const db = c.env.DB;
     const now = Date.now();
-    const { rows } = await pool.query(
-      `INSERT INTO clinics (id, name, type, category, active, created_at, updated_at, created_by, updated_by, is_archived)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'system', 'system', false)
-       RETURNING *`,
-      [name.toLowerCase().replace(/\s+/g, '_') + '_' + Date.now(), name, type || "General", category || "clinic", active !== false, now, now]
-    );
+    const id = name.toLowerCase().replace(/\s+/g, "_") + "_" + Date.now();
 
-    res.status(201).json({
-      id: String(rows[0].id),
-      name: rows[0].name,
-      type: rows[0].type,
-      category: rows[0].category,
-      active: rows[0].active,
-    });
+    const { results } = await db
+      .prepare(
+        `INSERT INTO clinics (id, name, type, category, active, created_at, updated_at, created_by, updated_by, is_archived)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'system', 'system', 0)
+         RETURNING *`
+      )
+      .bind(id, name, type || "General", category || "clinic", active !== false ? 1 : 0, now, now)
+      .all();
+
+    const row = results[0];
+    return c.json(
+      {
+        id: String(row.id),
+        name: row.name,
+        type: row.type,
+        category: row.category,
+        active: row.active !== 0,
+      },
+      201
+    );
   } catch (err) {
     console.error("POST /clinics error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
@@ -74,36 +83,31 @@ router.post("/", async (req, res) => {
  * PUT /clinics/:id
  * Update clinic fields (Admin only)
  */
-router.put("/:id", async (req, res) => {
+app.put("/:id", async (c) => {
   try {
-    const { role } = req.user;
-    if (role !== "admin") {
-      return res.status(403).json({ error: "Forbidden" });
+    const user = c.get("user");
+    if (user.role !== "admin") {
+      return c.json({ error: "Forbidden" }, 403);
     }
 
-    const { name, type, category, active } = req.body;
+    const { name, type, category, active } = await c.req.json();
+    const db = c.env.DB;
 
-    const sets = [`updated_at=${Date.now()}`];
-    const params = [];
-    let idx = 1;
+    const sets = ["updated_at=?"];
+    const params = [Date.now()];
 
-    if (name !== undefined) { sets.push(`name=$${idx++}`); params.push(name); }
-    if (type !== undefined) { sets.push(`type=$${idx++}`); params.push(type); }
-    if (category !== undefined) { sets.push(`category=$${idx++}`); params.push(category); }
-    if (active !== undefined) { sets.push(`active=$${idx++}`); params.push(active); }
+    if (name !== undefined) { sets.push("name=?"); params.push(name); }
+    if (type !== undefined) { sets.push("type=?"); params.push(type); }
+    if (category !== undefined) { sets.push("category=?"); params.push(category); }
+    if (active !== undefined) { sets.push("active=?"); params.push(active ? 1 : 0); }
 
-    params.push(req.params.id);
-    const whereClause = `id=$${idx++}`;
+    params.push(c.req.param("id"));
+    await db.prepare(`UPDATE clinics SET ${sets.join(", ")} WHERE id=?`).bind(...params).run();
 
-    await pool.query(
-      `UPDATE clinics SET ${sets.join(", ")} WHERE ${whereClause}`,
-      params
-    );
-
-    res.json({ success: true });
+    return c.json({ success: true });
   } catch (err) {
     console.error("PUT /clinics/:id error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
@@ -111,22 +115,24 @@ router.put("/:id", async (req, res) => {
  * PUT /clinics/:id/status
  * Toggle clinic active status (Admin only)
  */
-router.put("/:id/status", async (req, res) => {
+app.put("/:id/status", async (c) => {
   try {
-    const { role } = req.user;
-    if (role !== "admin") {
-      return res.status(403).json({ error: "Forbidden" });
+    const user = c.get("user");
+    if (user.role !== "admin") {
+      return c.json({ error: "Forbidden" }, 403);
     }
 
-    const { active } = req.body;
-    await pool.query(
-      `UPDATE clinics SET active=$1, updated_at=${Date.now()} WHERE id=$2`,
-      [active, req.params.id]
-    );
-    res.json({ success: true });
+    const { active } = await c.req.json();
+    const db = c.env.DB;
+    await db
+      .prepare("UPDATE clinics SET active=?, updated_at=? WHERE id=?")
+      .bind(active ? 1 : 0, Date.now(), c.req.param("id"))
+      .run();
+
+    return c.json({ success: true });
   } catch (err) {
     console.error("PUT /clinics/:id/status error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
@@ -134,19 +140,20 @@ router.put("/:id/status", async (req, res) => {
  * DELETE /clinics/:id
  * Delete a clinic (Admin only)
  */
-router.delete("/:id", async (req, res) => {
+app.delete("/:id", async (c) => {
   try {
-    const { role } = req.user;
-    if (role !== "admin") {
-      return res.status(403).json({ error: "Forbidden" });
+    const user = c.get("user");
+    if (user.role !== "admin") {
+      return c.json({ error: "Forbidden" }, 403);
     }
 
-    await pool.query("DELETE FROM clinics WHERE id=$1", [req.params.id]);
-    res.json({ success: true });
+    const db = c.env.DB;
+    await db.prepare("DELETE FROM clinics WHERE id=?").bind(c.req.param("id")).run();
+    return c.json({ success: true });
   } catch (err) {
     console.error("DELETE /clinics/:id error:", err);
-    res.status(500).json({ error: "Server error" });
+    return c.json({ error: "Server error" }, 500);
   }
 });
 
-export default router;
+export default app;
